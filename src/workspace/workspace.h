@@ -221,9 +221,7 @@ namespace umbriel {
     [[nodiscard]] const AnimatedValue* layoutMotionValue() const;
     // Advances the motion; true while it is still running.
     bool tickLayoutMotion(uint64_t nowMsec);
-    [[nodiscard]] bool layoutMotionActive() const {
-      return m_motion.progress.animating() || !m_motion.views.empty() || !m_motion.pendingOpenings.empty();
-    }
+    [[nodiscard]] bool layoutMotionActive() const { return m_motion.progress.animating() || !m_motion.views.empty(); }
 
   private:
     struct SinkPresentation {
@@ -275,8 +273,6 @@ namespace umbriel {
     // Snap or animate every tiled member of the layout into its slot from wherever it is presented now.
     void applyTiledMotion(const wlr_box& usable, bool animate, std::span<View* const> resized);
     void endLayoutMotion();
-    // Reveal every pending opener once no geometry motion runs. True while some opener still waits.
-    bool revealPendingOpenings();
     void syncCloseSnapshots();
     void discardCloseSnapshots();
     WorkspaceGroup* m_group = nullptr;
@@ -319,15 +315,9 @@ namespace umbriel {
         wlr_box to{};
         float direction = 1.0F;
       };
-      // A fresh tiled opener waiting for the reflow that made room for it.
-      struct PendingOpening {
-        View* view = nullptr;
-        wlr_box to{};
-      };
       AnimatedValue progress;
       MonotonicEasing geometryCurve;
       std::vector<ViewEntry> views;
-      std::vector<PendingOpening> pendingOpenings;
     };
     LayoutMotion m_motion;
     struct TrackedCloseSnapshot {

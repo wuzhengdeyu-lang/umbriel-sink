@@ -2894,8 +2894,8 @@ namespace umbriel {
         setFadeAlpha(1.0F);
         m_fade.snap(1.0);
       } else if (tiledMember) {
-        // The admitting arrange reveals a tiled member: immediately when its slot is already settled, otherwise once
-        // the windows_move reflow that makes room for it completes. An overview card follows that same reveal.
+        // The admitting arrange places and reveals a tiled member while established peers reflow. An overview card
+        // follows that same reveal.
         deferTiledOpening();
       } else {
         setFadeAlpha(0.0F);

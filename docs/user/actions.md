@@ -136,8 +136,9 @@ resizing the client. By default, the top entry uses 93% scale and 82% opacity,
 the next entry uses 85% scale and 45% opacity, and deeper entries remain in the
 logical stack but are not rendered. `[appearance.sink].visible_depth` and
 `levels` can change this presentation without changing stack order. Pull animates
-the projection back to its normal
-placement and does not hand focus or input to the live surface until the
+the projection back to its normal placement while other tiled windows make room;
+the scrolling layout reveals the restored column during the same transition.
+Pull does not hand focus or input to the live surface until the
 required resize commit arrives; an unresponsive client falls back after a
 bounded wait instead of blocking the compositor.
 
