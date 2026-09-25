@@ -1,13 +1,27 @@
 /*
-	The original wlr_renderer was heavily referenced in making this project
-	https://gitlab.freedesktop.org/wlroots/wlroots/-/tree/master/render/gles2
+        The original wlr_renderer was heavily referenced in making this project
+        https://gitlab.freedesktop.org/wlroots/wlroots/-/tree/master/render/gles2
 */
+
+#include "render/fx_renderer/fx_renderer.h"
+
+#include "render/egl.h"
+#include "render/fx_renderer/shaders.h"
+#include "render/fx_renderer/util.h"
+#include "render/pass.h"
+#include "render/tracy.h"
+#include "umbrielfx/render/fx_renderer/fx_offscreen_buffers.h"
+#include "umbrielfx/render/fx_renderer/fx_renderer.h"
+#include "umbrielfx/render/pass.h"
+#include "util/time.h"
+
+#include <GLES2/gl2.h>
 
 #include <assert.h>
 #include <drm_fourcc.h>
-#include <GLES2/gl2.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <umbrielfx/render/animation.h>
 #include <unistd.h>
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
@@ -17,18 +31,6 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 #include <xf86drm.h>
-
-#include "render/egl.h"
-#include "render/fx_renderer/shaders.h"
-#include <umbrielfx/render/animation.h>
-#include "render/fx_renderer/fx_renderer.h"
-#include "render/fx_renderer/util.h"
-#include "render/pass.h"
-#include "render/tracy.h"
-#include "umbrielfx/render/fx_renderer/fx_offscreen_buffers.h"
-#include "umbrielfx/render/fx_renderer/fx_renderer.h"
-#include "umbrielfx/render/pass.h"
-#include "util/time.h"
 
 static const struct wlr_renderer_impl renderer_impl;
 static const struct wlr_render_timer_impl render_timer_impl;
@@ -121,6 +123,9 @@ static void fx_renderer_destroy(struct wlr_renderer *wlr_renderer) {
 	struct fx_renderer *renderer = fx_get_renderer(wlr_renderer);
 	fx_animation_shader_unref(renderer->animation_shadow_horizontal);
 	fx_animation_shader_unref(renderer->animation_shadow_vertical);
+  fx_animation_shader_unref(renderer->self_blur_horizontal);
+  fx_animation_shader_unref(renderer->self_blur_vertical);
+  fx_animation_shader_unref(renderer->self_blur_single);
 
 	TRACY_GPU_CONTEXT_DESTROY(renderer->tracy_data);
 

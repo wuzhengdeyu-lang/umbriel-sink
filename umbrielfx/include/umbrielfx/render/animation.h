@@ -17,6 +17,9 @@ struct fx_animation_parameters {
   float progress;
   float linear_progress;
   float direction;
+  // Normalized presentation depth. Ordinary transitions leave this at zero;
+  // persistent subtree effects can use it without pretending to animate.
+  float depth;
   // Nonzero and unique for each logical transition, stable while it runs.
   uint64_t transition_id;
   // Stable values in [0, 1) for the lifetime of transition_id.

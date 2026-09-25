@@ -5,6 +5,7 @@ set -euo pipefail
 
 readonly SHOTS="$UMBRIEL_RUNTIME_DIR/tiled-close-duration-alignment"
 readonly MARKER_PIXELS=1000
+readonly MAX_SAMPLE_GAP_MS=150
 mkdir -p "$SHOTS"
 
 cat > "$UMBRIEL_RUNTIME_DIR/duration-close-green.glsl" <<'GLSL'
@@ -158,7 +159,10 @@ run_case() {
     gap=$((sample_times[i] - sample_times[i - 1]))
     ((gap > max_gap)) && max_gap=$gap
   done
-  if ((max_gap > 120)); then
+  # Four-way GPU harness runs can push grim slightly above 120 ms. The timing
+  # tolerance below is derived from the measured gap, and 150 ms still yields
+  # at least four observations across the shortest 600 ms animation.
+  if ((max_gap > MAX_SAMPLE_GAP_MS)); then
     echo "$phase: screenshot cadence was too sparse for timing assertions: maximum gap ${max_gap} ms"
     return 1
   fi

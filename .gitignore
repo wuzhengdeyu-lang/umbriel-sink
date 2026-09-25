@@ -1,4 +1,4 @@
-# Build
+# Build (including build-debug, build-release, and build-sink-release)
 build*/
 cmake-build-*/
 

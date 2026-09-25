@@ -10,9 +10,10 @@ readonly OVERVIEW_ZOOM=0.5
 readonly OVERVIEW_X=320
 readonly OVERVIEW_Y=180
 readonly POINTER="${UMBRIEL_POINTER_CLIENT:-./build-debug/tests/pointer-client}"
+readonly FOOT_COLORS_SECTION="${UMBRIEL_FOOT_COLORS_SECTION:-colors}"
 
 spawn_client() {
-  foot --config=/dev/null --override=colors.background=000000 \
+  foot --config=/dev/null --override="$FOOT_COLORS_SECTION.background=000000" \
     --title="left-hint-$1" sh -c 'sleep 120' > /dev/null 2>&1 &
 }
 

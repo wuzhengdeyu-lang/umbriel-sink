@@ -321,6 +321,53 @@ preserve_split = false
   CHECK(containsDiagnostic(store, "unknown key general.prefer_no_csd"));
 }
 
+UMBRIEL_TEST(sinkVisibleDepthAndLevelsLoadAndReloadAtomically) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  file.write(R"(
+[appearance.sink]
+visible_depth = 3
+levels = [
+  { scale = 0.91, opacity = 0.81, blur_strength = 0.4 },
+  { scale = 0.82, opacity = 0.52, blur_strength = 0.7 },
+  { scale = 0.73, opacity = 0.23, blur_strength = 1.0 },
+]
+)");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().appearance.sink.visibleDepth, 3);
+  CHECK_EQ(store.config().appearance.sink.levels[0].scale, 0.91);
+  CHECK_EQ(store.config().appearance.sink.levels[1].opacity, 0.52);
+  CHECK_EQ(store.config().appearance.sink.levels[2].blurStrength, 1.0);
+
+  file.write(R"(
+[appearance.sink]
+visible_depth = 3
+levels = [{ scale = 0.9, opacity = 0.8, blur_strength = 0.5 }]
+)");
+  CHECK(!store.reload().success);
+  CHECK_EQ(store.config().appearance.sink.visibleDepth, 3);
+  CHECK(containsDiagnostic(store, "needs at least visible_depth"));
+
+  file.write("[appearance.sink]\nvisible_depth = 1\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().appearance.sink.visibleDepth, 1);
+  CHECK_EQ(store.config().appearance.sink.levels[0].scale, 0.93);
+}
+
+UMBRIEL_TEST(sinkLevelsRequireCompleteNumericEntries) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  file.write(R"(
+[appearance.sink]
+levels = [{ scale = 0.9, opacity = 0.8, blur_strength = 0.5 },
+          { scale = 0.8, opacity = 0.4 }]
+)");
+  CHECK(!store.reload().success);
+  CHECK(containsDiagnostic(store, "requires numeric scale, opacity and blur_strength"));
+}
+
 UMBRIEL_TEST(rejectsRemovedWidthPresetKey) {
   const TempConfig file;
   file.write("[layout]\nwidth_presets = [0.75]\n");

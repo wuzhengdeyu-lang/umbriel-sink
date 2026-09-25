@@ -600,9 +600,21 @@ namespace umbriel {
       if (m_sessionLocked) {
         updateLockBlank();
       }
+      for (const auto& output : m_outputs) {
+        if (WorkspaceGroup* group = output->workspaceGroup()) {
+          group->refreshSinkPresentations(false);
+        }
+      }
     }
-    if (effects.animation && m_scratchpadManager != nullptr) {
-      m_scratchpadManager->applyConfig();
+    if (effects.animation) {
+      if (m_scratchpadManager != nullptr) {
+        m_scratchpadManager->applyConfig();
+      }
+      for (const auto& output : m_outputs) {
+        if (WorkspaceGroup* group = output->workspaceGroup()) {
+          group->refreshSinkPresentations(false);
+        }
+      }
     }
     if (effects.layerEffects) {
       for (const auto& layer : m_layerSurfaces) {
@@ -1212,7 +1224,10 @@ namespace umbriel {
       } else if (View* view = View::fromSurface(root)) {
         int x = 0;
         int y = 0;
-        inhibited = view->mapped() && wlr_scene_node_coords(&view->sceneTree()->node, &x, &y);
+        // Sink projections are context, not foreground activity. Their hidden
+        // live surfaces must not keep the session awake even when a top-two
+        // projection is visible.
+        inhibited = view->mapped() && !view->sunk() && wlr_scene_node_coords(&view->sceneTree()->node, &x, &y);
       } else if (wlr_layer_surface_v1* wlrLayer = wlr_layer_surface_v1_try_from_wlr_surface(root)) {
         auto* layer = static_cast<LayerSurface*>(wlrLayer->data);
         Output* output = layer != nullptr ? layer->output() : nullptr;
@@ -1945,6 +1960,9 @@ namespace umbriel {
             .pendingNamedScrollingColumnExtentPx = std::nullopt,
             .pendingNamedScrollingColumnExtent = std::nullopt,
             .layoutModeOverride = workspace->layoutModeOverride(),
+            .sinkOrder = workspace->sinkDepth(view.get()).transform([workspace](size_t depth) {
+              return workspace->sinkCount() - depth - 1;
+            }),
             .floatingOutputPosition = std::nullopt,
             .configGeneration = configStore().generation(),
             .layoutProtectionOnly = tiledOnly,
@@ -1970,7 +1988,19 @@ namespace umbriel {
         if (workspace == nullptr || workspace->group() != sourceGroup) {
           continue;
         }
-        leaving.push_back(view.get());
+        if (!view->sunk()) {
+          leaving.push_back(view.get());
+        }
+      }
+      // Append Sunk entries by stable Workspace order and bottom-to-top stack
+      // order. The destination keeps its existing bottom and receives each
+      // source stack intact above it.
+      for (size_t index = 0; index < sourceGroup->workspaceCount(); ++index) {
+        Workspace* workspace = sourceGroup->workspaceAt(index);
+        if (workspace == nullptr) {
+          continue;
+        }
+        leaving.insert(leaving.end(), workspace->sunkEntries().begin(), workspace->sunkEntries().end());
       }
 
       // Capture every source workspace before the first move. Moving a view can
@@ -2057,8 +2087,16 @@ namespace umbriel {
       if (left.outputName != right.outputName) {
         return left.outputName < right.outputName;
       }
-      return left.workspaceIndex != right.workspaceIndex ? left.workspaceIndex < right.workspaceIndex
-                                                         : left.workspaceName < right.workspaceName;
+      if (left.workspaceIndex != right.workspaceIndex) {
+        return left.workspaceIndex < right.workspaceIndex;
+      }
+      if (left.workspaceName != right.workspaceName) {
+        return left.workspaceName < right.workspaceName;
+      }
+      if (left.sinkOrder.has_value() != right.sinkOrder.has_value()) {
+        return !left.sinkOrder.has_value();
+      }
+      return left.sinkOrder.value_or(0) < right.sinkOrder.value_or(0);
     });
 
     struct RestoredViewport {

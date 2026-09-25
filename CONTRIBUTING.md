@@ -5,7 +5,7 @@ This file collects contributor-facing details for Umbriel: design goals, stack n
 and debugging helpers. Umbriel shares its conventions with [noctalia](https://github.com/noctalia-dev/noctalia):
 same team, same style. If in doubt, match what noctalia does.
 
-For dependencies and normal build commands, start with [README.md](README.md). For what the project accepts and
+For upstream dependencies and normal build commands, start with [README-UMBRIEL.md](README-UMBRIEL.md). For what the project accepts and
 declines, read [SCOPE.md](SCOPE.md): it is the reference used when triaging feature requests and unsolicited pull
 requests.
 
@@ -244,7 +244,7 @@ Conventions:
 - Vendored Wayland protocol XML lives in `protocols/` and is code-generated via `wayland-scanner` in `meson.build`.
 - User-facing configuration documentation lives in [`docs/user/`](docs/user/). Update it when adding or changing
   config options. The reference pages are linked from [`examples/config.toml`](examples/config.toml) and the
-  [README](README.md#configuration). Maintainer design notes live in [`docs/design/`](docs/design/).
+  [upstream README](README-UMBRIEL.md#configuration). Maintainer design notes live in [`docs/design/`](docs/design/).
 
 ## umbrielfx
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots one contained headless Umbriel per check in checks/, runs the check, kills everything it spawned, and asserts
+# Boots one contained Umbriel per check in checks/, runs the check, kills everything it spawned, and asserts
 # that instance exited cleanly. One instance per check is what makes a failure local: a check starts from the default
 # config with no windows, no overview, and workspace 1 focused, so it asserts behaviour instead of maintaining hygiene
 # for whatever runs next. Boot plus teardown measures about 80ms, under 4% of the suite, and it buys back the
@@ -116,6 +116,30 @@ if ((${#SELECTED[@]} == 0)); then
   exit 1
 fi
 
+# Only the performance matrix may opt into a nested Wayland backend. Other
+# checks rely on the headless output's fixed geometry and independent clock.
+CHECK_BACKEND=${CHECK_BACKEND:-headless}
+case $CHECK_BACKEND in
+  headless) ;;
+  wayland)
+    if ((${#SELECTED[@]} != 1)) || [[ ${SELECTED[0]} != 159_sink_performance_matrix ]]; then
+      echo 'check: CHECK_BACKEND=wayland requires only 159_sink_performance_matrix' >&2
+      exit 2
+    fi
+    if [[ ${WAYLAND_DISPLAY:-} == /* ]]; then
+      PARENT_WAYLAND_SOCKET=$WAYLAND_DISPLAY
+    else
+      PARENT_WAYLAND_SOCKET=${XDG_RUNTIME_DIR:-}/${WAYLAND_DISPLAY:-}
+    fi
+    if [[ ! -S $PARENT_WAYLAND_SOCKET ]]; then
+      echo "check: parent Wayland socket unavailable: $PARENT_WAYLAND_SOCKET" >&2
+      exit 2
+    fi
+    export UMBRIEL_PARENT_WAYLAND_SOCKET=$PARENT_WAYLAND_SOCKET
+    ;;
+  *) echo "check: unsupported CHECK_BACKEND=$CHECK_BACKEND" >&2; exit 2 ;;
+esac
+
 if [[ ! -x $BINARY ]]; then
   echo "check: '$BINARY' is not executable" >&2
   exit 1
@@ -137,6 +161,7 @@ export UMBRIEL_GLOBAL_CLIENT="$CLIENT_DIR/global-client"
 export UMBRIEL_DATA_CONTROL_CLIENT="$CLIENT_DIR/data-control-client"
 export UMBRIEL_WORKSPACE_CLIENT="$CLIENT_DIR/workspace-client"
 export UMBRIEL_FOREIGN_TOPLEVEL_CLIENT="$CLIENT_DIR/foreign-toplevel-client"
+export UMBRIEL_TOPLEVEL_CAPTURE_CLIENT="$CLIENT_DIR/toplevel-capture-client"
 export UMBRIEL_UNMAP_CLIENT="$CLIENT_DIR/unmap-client"
 export UMBRIEL_POPUP_CLIENT="$CLIENT_DIR/popup-client"
 export UMBRIEL_IDLE_INHIBIT_CLIENT="$CLIENT_DIR/idle-inhibit-client"
@@ -147,6 +172,17 @@ export UMBRIEL_SECURITY_CONTEXT_CLIENT="$CLIENT_DIR/security-context-client"
 export UMBRIEL_SEAT_LOG_CLIENT="$CLIENT_DIR/seat-log-client"
 export UMBRIEL_OUTPUT_MANAGEMENT_CLIENT="$CLIENT_DIR/output-management-client"
 export UMBRIEL=$BINARY
+
+# foot 1.28 split theme colours into colors-dark/colors-light, while older
+# releases use colors. Export the section accepted by the installed helper so
+# checks do not silently render foot's configuration error into their pixels.
+UMBRIEL_FOOT_COLORS_SECTION=colors
+if command -v foot > /dev/null \
+    && ! foot --config=/dev/null --override=colors.background=000000 --check-config > /dev/null 2>&1 \
+    && foot --config=/dev/null --override=colors-dark.background=000000 --check-config > /dev/null 2>&1; then
+  UMBRIEL_FOOT_COLORS_SECTION=colors-dark
+fi
+export UMBRIEL_FOOT_COLORS_SECTION
 
 # Live instance state. The EXIT trap reaches for these, so they stay declared
 # even before the first check boots.
@@ -319,7 +355,8 @@ check_outputs() {
 # Boots an instance and exports the environment a check runs against. On failure
 # it sets BOOT_ERROR and leaves the runtime directory for the caller to keep.
 start_instance() {
-  local outputs=$1
+  local outputs=$1 name=$2 render_timing=0
+  [[ $name == 159_sink_performance_matrix ]] && render_timing=1
   # sockaddr_un caps paths at 108 bytes and the compositor appends
   # "/umbriel-wayland-0.sock" (23) to XDG_RUNTIME_DIR, so keep the root short. A
   # long path makes wl_display_add_socket fail and the boot abort.
@@ -335,11 +372,17 @@ start_instance() {
   # signalled. The wrapper reports the group id it leads and then execs the
   # compositor in place, so SERVER_PID stays the compositor.
   local pgid_file=$RUNTIME_DIR/instance.pgid
-  setsid env -u WAYLAND_DISPLAY -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+  local -a unset_display=(-u WAYLAND_DISPLAY)
+  local -a backend_env=(WLR_BACKENDS=headless WLR_HEADLESS_OUTPUTS="$outputs")
+  if [[ $CHECK_BACKEND == wayland ]]; then
+    unset_display=()
+    backend_env=(WAYLAND_DISPLAY="$PARENT_WAYLAND_SOCKET" WLR_BACKENDS=wayland)
+  fi
+  setsid env -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS "${unset_display[@]}" \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-    WLR_BACKENDS=headless \
+    "${backend_env[@]}" \
     WLR_LIBINPUT_NO_DEVICES=1 \
-    WLR_HEADLESS_OUTPUTS="$outputs" \
+    UMBRIEL_RENDER_TIMING="$render_timing" \
     bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pgid_file" \
     "$BINARY" -c "$config" > "$log" 2>&1 &
   SERVER_PID=$!
@@ -365,6 +408,7 @@ start_instance() {
 
   export UMBRIEL_SOCKET=$socket
   export UMBRIEL_RUNTIME_DIR=$RUNTIME_DIR
+  export UMBRIEL_SERVER_PID=$SERVER_PID
   export UMBRIEL_LOG=$log
   export UMBRIEL_CONFIG=$config
   return 0
@@ -452,10 +496,13 @@ stop_instance() {
 # environment silently points them at the developer's live compositor.
 run_check_body() {
   local name=$1 output_file=$2
+  local render_timing=0
+  [[ $name == 159_sink_performance_matrix ]] && render_timing=1
   local pgid_file=$RUNTIME_DIR/check.pgid
   setsid env -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     WAYLAND_DISPLAY=wayland-0 \
+    UMBRIEL_RENDER_TIMING="$render_timing" \
     bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pgid_file" \
     timeout -k 5 "$CHECK_TIMEOUT" bash "$HARNESS_DIR/checks/$name.sh" > "$output_file" 2>&1 &
   local body_pid=$!
@@ -482,7 +529,7 @@ run_one() {
   check_start=$(now_us)
 
   BOOT_ERROR=
-  if ! start_instance "$(check_outputs "$name")"; then
+  if ! start_instance "$(check_outputs "$name")" "$name"; then
     publish "$prefix" 1 "$check_start" "$BOOT_ERROR"
     return 0
   fi

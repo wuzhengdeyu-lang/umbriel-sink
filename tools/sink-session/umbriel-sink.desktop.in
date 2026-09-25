@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Umbriel Sink
+Comment=Umbriel with the experimental Sink/Pull window stack
+Exec=@UMBRIEL_SINK_LAUNCHER@
+Type=Application
+DesktopNames=Umbriel

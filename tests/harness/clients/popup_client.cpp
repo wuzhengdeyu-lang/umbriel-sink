@@ -44,6 +44,7 @@ namespace {
     Buffer popupBuffer;
     bool mapped = false;
     bool popupMapped = false;
+    bool popupGrab = true;
   };
 
   Buffer createBuffer(State& state, int width, int height, uint32_t color) {
@@ -121,7 +122,9 @@ namespace {
     state.popup = xdg_surface_get_popup(state.popupXdgSurface, state.xdgSurface, positioner);
     xdg_positioner_destroy(positioner);
     xdg_popup_add_listener(state.popup, &kPopupListener, &state);
-    xdg_popup_grab(state.popup, state.seat, serial);
+    if (state.popupGrab) {
+      xdg_popup_grab(state.popup, state.seat, serial);
+    }
     wl_surface_commit(state.popupSurface);
   }
 
@@ -253,6 +256,7 @@ namespace {
 
 int main() {
   State state;
+  state.popupGrab = std::getenv("POPUP_NO_GRAB") == nullptr;
   state.display = wl_display_connect(nullptr);
   if (state.display == nullptr) {
     std::println(stderr, "popup-client: cannot connect to WAYLAND_DISPLAY");

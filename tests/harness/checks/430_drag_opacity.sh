@@ -7,12 +7,14 @@ readonly BTN_LEFT=272
 readonly OUTPUT_W=1280
 readonly OUTPUT_H=720
 readonly POINTER="${UMBRIEL_POINTER_CLIENT:-./build-debug/tests/pointer-client}"
+readonly FOOT_COLORS_SECTION="${UMBRIEL_FOOT_COLORS_SECTION:-colors}"
 
 measure_drag_green() {
   local alpha=$1 title=$2
   local screenshot="$UMBRIEL_RUNTIME_DIR/$title.png"
   local client_pid pointer_pid
-  foot --config=/dev/null --override=colors.background=000000 --override="colors.alpha=$alpha" \
+  foot --config=/dev/null --override="$FOOT_COLORS_SECTION.background=000000" \
+    --override="$FOOT_COLORS_SECTION.alpha=$alpha" \
     --title="$title" sh -c 'sleep 120' > /dev/null 2>&1 &
   client_pid=$!
   for _ in $(seq 60); do

@@ -30,6 +30,8 @@ unit_tests = [
   ['shortcut-labels', ['unit/shortcut_labels.cpp'], []],
   ['border-ring', ['unit/border_ring.cpp'], []],
   ['floating', ['unit/floating.cpp'], []],
+  ['sink-stack', ['unit/sink_stack.cpp'], []],
+  ['sink-presentation', ['unit/sink_presentation.cpp'], []],
   ['preset-cycle', ['unit/preset_cycle.cpp'], []],
   ['maximize', ['unit/maximize.cpp'], []],
   ['deferred-unfullscreen', ['unit/deferred_unfullscreen.cpp'], []],
@@ -188,6 +190,22 @@ foreign_toplevel_client = executable(
   dependencies: [wayland_client_dep],
 )
 
+# Harness helper that captures one ext-foreign-toplevel source into shared
+# memory and prints a center-region color sample.
+toplevel_capture_client = executable(
+  'toplevel-capture-client',
+  [
+    'harness/clients/toplevel_capture_client.cpp',
+    ext_foreign_toplevel_list_client_h,
+    ext_foreign_toplevel_list_client_c,
+    ext_image_capture_source_client_h,
+    ext_image_capture_source_client_c,
+    ext_image_copy_capture_client_h,
+    ext_image_copy_capture_client_c,
+  ],
+  dependencies: [wayland_client_dep],
+)
+
 # Harness helper that unmaps its toplevel on a close request without destroying
 # it, so the compositor keeps the View registered but unmapped.
 unmap_client = executable(
@@ -322,6 +340,7 @@ harness_client_targets = [
   data_control_client,
   workspace_client,
   foreign_toplevel_client,
+  toplevel_capture_client,
   unmap_client,
   popup_client,
   subsurface_client,

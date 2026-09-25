@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 #include <wayland-server-core.h>
 
 struct wlr_gamma_control_v1;
@@ -24,11 +25,27 @@ extern "C" {
 
 namespace umbriel {
 
+  struct RenderTimingStats {
+    bool enabled = false;
+    uint64_t frameCallbacks = 0;
+    uint64_t renderedFrames = 0;
+    uint64_t idleCallbacks = 0;
+    uint64_t gpuSamples = 0;
+    uint64_t gpuTotalNs = 0;
+    uint64_t gpuMinNs = 0;
+    uint64_t gpuMaxNs = 0;
+    uint64_t cpuSamples = 0;
+    uint64_t cpuTotalNs = 0;
+    uint64_t cpuMinNs = 0;
+    uint64_t cpuMaxNs = 0;
+  };
+
   enum class HdrMode;
   class Server;
   class View;
   class WorkspaceGroup;
   struct OutputIdentity;
+  struct PendingRenderTimer;
 
   class Output {
   public:
@@ -88,6 +105,9 @@ namespace umbriel {
     [[nodiscard]] bool configuredTearingAllowed() const;
     [[nodiscard]] bool tearingRequested() const;
     [[nodiscard]] bool lastCommitTearing() const { return m_lastCommitTearing; }
+    // Logical VRR policy request before backend capability/fallback handling.
+    [[nodiscard]] bool vrrRequested() const;
+    [[nodiscard]] const RenderTimingStats& renderTimingStats() const { return m_renderTiming; }
     [[nodiscard]] const std::optional<uint32_t>& lastPresentationFlags() const { return m_lastPresentationFlags; }
     [[nodiscard]] const std::optional<bool>& lastPresentationPresented() const { return m_lastPresentationPresented; }
     [[nodiscard]] std::optional<bool> lastPresentationVsync() const;
@@ -140,6 +160,7 @@ namespace umbriel {
     wlr_output_layout_output* addToLayout();
     void arrangeLayer(wlr_scene_tree* tree, const wlr_box* fullArea, wlr_box* usableArea, bool exclusive);
     void updateOptimizedBlur(const wlr_box& fullArea);
+    void collectRenderTimings();
 
     Server* m_server = nullptr;
     wlr_output* m_output = nullptr;
@@ -181,6 +202,9 @@ namespace umbriel {
     TearingCommitRecovery m_tearingRecovery;
     int m_deferredWidth = 0;
     int m_deferredHeight = 0;
+    RenderTimingStats m_renderTiming;
+    std::vector<std::unique_ptr<PendingRenderTimer>> m_pendingRenderTimers;
+    uint8_t m_renderTimerFailures = 0;
 
     wl_listener m_frame{};
     wl_listener m_requestState{};

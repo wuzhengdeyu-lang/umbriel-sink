@@ -1,7 +1,7 @@
 # Packaging Umbriel
 
 Notes for distribution packagers. End-user installation documentation lives
-in the [README](README.md) and at [docs.noctalia.dev](https://docs.noctalia.dev/umbriel/).
+in the [upstream README](README-UMBRIEL.md) and at [docs.noctalia.dev](https://docs.noctalia.dev/umbriel/).
 
 ## Package description
 

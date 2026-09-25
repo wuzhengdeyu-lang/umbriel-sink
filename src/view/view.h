@@ -38,6 +38,7 @@ namespace umbriel {
 
   class Server;
   class ScratchpadManager;
+  class WindowProjection;
   class WineColorManager;
   class Workspace;
   enum class LayoutAttachOrigin;
@@ -69,8 +70,15 @@ namespace umbriel {
     // Effective optional window-rule override used by tearing diagnostics.
     [[nodiscard]] std::optional<bool> tearingRuleOverride();
     [[nodiscard]] bool onActiveWorkspace() const { return m_onActiveWorkspace; }
+    [[nodiscard]] bool sunk() const { return m_sunk; }
+    // True while a passive projection is the sole workspace presentation
+    // owner. Logical Pull may already have restored layout membership while a
+    // resize commit is still outstanding.
+    [[nodiscard]] bool projectionOwnsPresentation() const { return m_projectionOwnsPresentation; }
     [[nodiscard]] bool tiled() const { return m_tiled; }
     [[nodiscard]] bool floating() const { return !m_tiled; }
+    [[nodiscard]] bool activeTiled() const { return !m_sunk && m_tiled; }
+    [[nodiscard]] bool activeFloating() const { return !m_sunk && !m_tiled; }
     [[nodiscard]] bool isAloneInLayout() const;
     [[nodiscard]] const std::optional<std::string>& namedScrollingColumnName() const {
       return m_namedScrollingColumnName;
@@ -141,6 +149,9 @@ namespace umbriel {
       std::optional<int> pendingNamedScrollingColumnExtentPx;
       std::optional<double> pendingNamedScrollingColumnExtent;
       std::optional<LayoutMode> layoutModeOverride;
+      // Bottom-to-top position in the home Workspace Sink stack. Refugee
+      // restores use this to reconstruct each source stack deterministically.
+      std::optional<size_t> sinkOrder;
       // Position relative to the full logical output. Unlike the ordinary
       // usable-area memory, this stays stable while a returning panel has not
       // recreated its exclusive zone yet.
@@ -298,6 +309,7 @@ namespace umbriel {
     friend class Popup;
     friend class Overview;
     friend class Workspace;
+    friend class WindowProjection;
 
     enum class FullscreenExitLayout {
       Immediate,
@@ -341,6 +353,10 @@ namespace umbriel {
     void handleMap();
     void handleUnmap();
     void handleCommit(bool reconfigureOpeningState = false);
+    void registerProjection(WindowProjection* projection);
+    void unregisterProjection(WindowProjection* projection);
+    void syncWindowProjections();
+    [[nodiscard]] bool projectionCommitReady() const;
     void setXdgTag(std::string_view tag);
     void syncContentType(wlr_surface* committedSurface = nullptr);
     void handleDestroy();
@@ -619,6 +635,10 @@ namespace umbriel {
     double m_openingScale = 1.0;
     int m_openingSlide = 0;
     bool m_tiled = false;
+    // Orthogonal to base tiled/floating placement. Workspace owns membership
+    // and is the only code allowed to change this flag.
+    bool m_sunk = false;
+    bool m_projectionOwnsPresentation = false;
     bool m_floatingMaximized = false;
     bool m_maximizedToEdges = false;
     bool m_restoreMaximizedToEdges = false;
@@ -660,6 +680,7 @@ namespace umbriel {
     // compositor-managed opacity is restored on the frame after every scene helper commit listener has run.
     bool m_effectiveOpacityCommitPending = false;
     std::vector<std::unique_ptr<ViewSurfaceWatch>> m_viewSurfaceWatches;
+    std::vector<WindowProjection*> m_windowProjections;
     bool m_hasMaximizeRestoreBox = false;
     wlr_box m_maximizeRestoreBox{};
     FloatingGeometry m_floating;

@@ -25,6 +25,8 @@ namespace umbriel {
     Startup,      // map, setFloating, refocus fallback
     XdgActivation,
     ForeignActivation,
+    OverviewSelection,
+    SinkPull, // explicit window-pull after the view has left the sink stack
   };
 
   // Who holds keyboard focus, and everything that has to change when that moves. Focus is not one piece of state. It is

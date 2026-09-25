@@ -53,6 +53,9 @@ namespace umbriel {
   void Popup::onUnmap(wl_listener* listener, void* /*data*/) {
     Popup* self = wl_container_of(listener, self, m_unmap); // NOLINT(modernize-use-auto)
     self->m_blur.hide();
+    if (View* view = View::fromSurface(self->m_popup->parent)) {
+      view->syncWindowProjections();
+    }
   }
 
   void Popup::onDestroy(wl_listener* listener, void* /*data*/) {
@@ -72,6 +75,9 @@ namespace umbriel {
         static_cast<wlr_scene_tree*>(m_popup->base->data), m_popup->base->surface,
         wlr_box{0, 0, geometry.width, geometry.height}, geometry, 0, nullptr, blurOptions
     );
+    if (View* view = View::fromSurface(m_popup->parent)) {
+      view->syncWindowProjections();
+    }
     if (!m_popup->base->initial_commit) {
       return;
     }
@@ -102,6 +108,7 @@ namespace umbriel {
   }
 
   void Popup::handleDestroy() {
+    View* owner = View::fromSurface(m_popup->parent);
     wl_list_remove(&m_commit.link);
     wl_list_remove(&m_reposition.link);
     wl_list_remove(&m_unmap.link);
@@ -110,6 +117,9 @@ namespace umbriel {
     m_reposition.link.next = nullptr;
     m_unmap.link.next = nullptr;
     m_destroy.link.next = nullptr;
+    if (owner != nullptr) {
+      owner->syncWindowProjections();
+    }
     delete this;
   }
 

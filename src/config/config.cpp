@@ -1248,6 +1248,68 @@ namespace umbriel {
               .integer("offset_x", -200, 200, appearance.shadow.offsetX)
               .integer("offset_y", -200, 200, appearance.shadow.offsetY);
         });
+        s.sub("sink", [&](Section& sink) {
+          sink.boolean("self_blur", appearance.sink.selfBlur)
+              .integer("blur_radius", 1, 32, appearance.sink.blurRadius)
+              .integer("blur_samples", 3, 17, appearance.sink.blurSamples)
+              .integer("visible_depth", 1, 4, appearance.sink.visibleDepth);
+
+          const toml::node* levelsNode = sink.take("levels");
+          if (levelsNode == nullptr) {
+            return;
+          }
+          const toml::array* levels = levelsNode->as_array();
+          if (levels == nullptr || levels->empty() || levels->size() > appearance.sink.levels.size()) {
+            errorAt(levelsNode->source(), "appearance.sink.levels must be an array of 1 to 4 tables");
+            return;
+          }
+          if (levels->size() < static_cast<size_t>(appearance.sink.visibleDepth)) {
+            errorAt(
+                levelsNode->source(), "appearance.sink.levels needs at least visible_depth ({}) entries",
+                appearance.sink.visibleDepth
+            );
+            return;
+          }
+          auto parsed = appearance.sink.levels;
+          bool valid = true;
+          for (size_t index = 0; index < levels->size(); ++index) {
+            const toml::node& entry = *levels->get(index);
+            const toml::table* table = entry.as_table();
+            if (table == nullptr) {
+              errorAt(entry.source(), "appearance.sink.levels[{}] must be a table", index);
+              valid = false;
+              continue;
+            }
+            for (const auto& [key, value] : *table) {
+              if (key != "scale" && key != "opacity" && key != "blur_strength") {
+                warnAt(value.source(), "unknown key appearance.sink.levels[{}].{}", index, key.str());
+              }
+            }
+            const auto readLevelValue = [&](std::string_view key, double minimum,
+                                            double maximum) -> std::optional<double> {
+              const toml::node* valueNode = table->get(key);
+              const auto value = valueNode != nullptr ? valueNode->value<double>() : std::nullopt;
+              if (!value || !std::isfinite(*value) || *value < minimum || *value > maximum) {
+                return std::nullopt;
+              }
+              return value;
+            };
+            const auto scale = readLevelValue("scale", 0.1, 1.0);
+            const auto opacity = readLevelValue("opacity", 0.0, 1.0);
+            const auto blurStrength = readLevelValue("blur_strength", 0.0, 1.0);
+            if (!scale || !opacity || !blurStrength) {
+              errorAt(
+                  entry.source(), "appearance.sink.levels[{}] requires numeric scale, opacity and blur_strength", index
+              );
+              valid = false;
+              continue;
+            }
+            parsed[index] = {.scale = *scale, .opacity = *opacity, .blurStrength = *blurStrength};
+          }
+          if (valid) {
+            appearance.sink.levels = parsed;
+          }
+        });
       });
     }
 

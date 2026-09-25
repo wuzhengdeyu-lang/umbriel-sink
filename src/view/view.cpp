@@ -11,6 +11,7 @@
 #include "output/output.h"
 #include "overview/overview.h"
 #include "scene/animation_shader.h"
+#include "scene/window_projection.h"
 #include "server/server.h"
 extern "C" {
 #include <umbrielfx/render/animation.h>
@@ -333,10 +334,11 @@ namespace umbriel {
     if (m_workspace != nullptr) {
       Workspace* previous = m_workspace;
       const bool sameGroup = workspace != nullptr && workspace->group() == previous->group();
+      const bool preserveSink = m_sunk;
       m_workspace = nullptr;
       // Keep an empty destination alive until this view has been attached.
       // addView() reconciles the group after the transfer is complete.
-      previous->removeView(this, !sameGroup);
+      previous->removeView(this, !sameGroup, preserveSink);
     }
     m_workspace = workspace;
     if (m_workspace != nullptr) {
@@ -451,8 +453,8 @@ namespace umbriel {
     }
     m_onActiveWorkspace = active;
     if (m_sceneTree != nullptr) {
-      wlr_scene_node_set_enabled(&m_sceneTree->node, active);
-      m_decoration.setShadowEnabled(active);
+      wlr_scene_node_set_enabled(&m_sceneTree->node, active && !m_projectionOwnsPresentation);
+      m_decoration.setShadowEnabled(active && !m_projectionOwnsPresentation);
     } else {
       m_decoration.setShadowEnabled(active);
     }
@@ -478,10 +480,33 @@ namespace umbriel {
   }
 
   void View::setNodeEnabled(bool enabled) {
-    enabled = enabled && !m_tiledOpeningDeferred;
+    enabled = enabled && !m_tiledOpeningDeferred && !m_projectionOwnsPresentation;
     wlr_scene_node_set_enabled(&m_sceneTree->node, enabled);
     m_decoration.setShadowEnabled(enabled);
     m_server->updateIdleInhibit();
+  }
+
+  void View::registerProjection(WindowProjection* projection) {
+    if (projection != nullptr && !std::ranges::contains(m_windowProjections, projection)) {
+      m_windowProjections.push_back(projection);
+    }
+  }
+
+  void View::unregisterProjection(WindowProjection* projection) { std::erase(m_windowProjections, projection); }
+
+  void View::syncWindowProjections() {
+    // Work on a copy: an owner reacting to a surface notification may tear a
+    // projection down before the next entry is visited.
+    const std::vector<WindowProjection*> projections = m_windowProjections;
+    for (WindowProjection* projection : projections) {
+      if (projection != nullptr && std::ranges::contains(m_windowProjections, projection)) {
+        projection->syncSurfaces();
+      }
+    }
+  }
+
+  bool View::projectionCommitReady() const {
+    return !m_tiledSizeRequest.has_value() && !m_floating.pendingSize().has_value();
   }
 
   void View::raiseToTop() {
@@ -611,7 +636,7 @@ namespace umbriel {
   void View::applySeatFocus(bool withKeyboard) {
     // Mechanism only. Policy lives in Server::focusView; do not call directly
     // from input/event code.
-    if (!m_onActiveWorkspace && !m_pinned) {
+    if (m_sunk || (!m_onActiveWorkspace && !m_pinned)) {
       return;
     }
 
@@ -2154,6 +2179,10 @@ namespace umbriel {
     }
     updateShadow();
     reloadBackdropColor();
+    syncWindowProjections();
+    if (m_workspace != nullptr && (m_sunk || m_projectionOwnsPresentation)) {
+      m_workspace->refreshSinkPresentation(false);
+    }
   }
 
   CloseSnapshotId View::beginCloseAnimation() {
@@ -2614,6 +2643,9 @@ namespace umbriel {
   wlr_scene_tree* View::homeTree() const {
     const bool fs = m_toplevel->scheduled.fullscreen;
     if (m_workspace != nullptr) {
+      if (m_sunk) {
+        return m_workspace->sinkLayer();
+      }
       return fs ? m_workspace->fullscreenTree() : m_workspace->viewLayer(m_tiled);
     }
     return fs ? m_server->fullscreenTree() : m_server->xdgTree();
@@ -2744,6 +2776,13 @@ namespace umbriel {
     m_initialRulesSettled = !anyWindowRuleHasTitlePattern(config());
 
     showDecorations(!m_toplevel->scheduled.fullscreen);
+
+    // A newly mapped independent transient must not be stranded above an
+    // inaccessible sunk parent. Restore the parent chain before admitting the
+    // child through the ordinary placement path.
+    if (View* parent = xdgParent(); parent != nullptr && parent->sunk() && parent->workspace() != nullptr) {
+      (void)parent->workspace()->unwindTo(parent);
+    }
 
     if (m_workspace != nullptr) {
       m_workspace->layoutAttach(
@@ -2929,6 +2968,9 @@ namespace umbriel {
 
   void View::handleUnmap() {
     Workspace* closingWorkspace = m_workspace;
+    if (closingWorkspace != nullptr && m_sunk) {
+      closingWorkspace->removeFromSinkStack(this);
+    }
     Cursor* cursor = m_server->cursor();
     wlr_seat* seat = m_server->seat()->wlr();
     const Overview* overview = m_server->overview();
@@ -3387,6 +3429,10 @@ namespace umbriel {
     if (m_mapped && m_acceptClientMaximizeRequests) {
       m_consumeRestoredMaximizeRequest = false;
     }
+    syncWindowProjections();
+    if (m_workspace != nullptr) {
+      m_workspace->onViewCommitted(this);
+    }
   }
 
   void View::handleDestroy() {
@@ -3441,16 +3487,34 @@ namespace umbriel {
   }
 
   void View::handleRequestMove(void* data) {
+    if (m_sunk) {
+      return;
+    }
     auto* event = static_cast<wlr_xdg_toplevel_move_event*>(data);
     m_server->cursor()->beginClientMove(this, event->seat, event->serial);
   }
 
   void View::handleRequestResize(void* data) {
+    if (m_sunk) {
+      return;
+    }
     auto* event = static_cast<wlr_xdg_toplevel_resize_event*>(data);
     m_server->cursor()->beginClientResize(this, event->seat, event->serial, event->edges);
   }
 
   void View::setMaximized(bool maximized, bool animate) {
+    if (m_sunk && m_tiled) {
+      // The layout slot is intentionally detached, so retain the requested
+      // protocol state and materialize its full-width column when Pull inserts
+      // the view again. Floating entries can apply their geometry immediately
+      // below because their restore box is independent of layout membership.
+      wlr_xdg_toplevel_set_maximized(m_toplevel, maximized);
+      updateForeignState();
+      if (m_workspace != nullptr) {
+        m_workspace->refreshSinkPresentation(true);
+      }
+      return;
+    }
     if (m_tiled && m_workspace != nullptr) {
       m_floatingMaximized = false;
       if (m_maximizedToEdges) {
@@ -3579,6 +3643,9 @@ namespace umbriel {
   }
 
   void View::setMaximizedToEdges(bool maximized, bool animate) {
+    if (m_sunk) {
+      return;
+    }
     if (!maximized) {
       m_restoreMaximizedToEdges = false;
     }
@@ -3669,6 +3736,13 @@ namespace umbriel {
     );
 
     const bool requested = m_toplevel->requested.fullscreen;
+    if (m_sunk) {
+      // Deactivated fullscreen clients normally get a short unfullscreen
+      // grace period. A Sunk client cannot regain activation until Pull, so
+      // parking here would turn a real state change into stale intent.
+      setFullscreen(requested);
+      return;
+    }
     const FullscreenRequestDisposition disposition = m_deferredUnfullscreen.observeClientRequest(
         requested, m_toplevel->scheduled.activated, m_toplevel->scheduled.fullscreen
     );
@@ -3697,6 +3771,12 @@ namespace umbriel {
 
   void View::handleSetParent() {
     if (m_mapped) {
+      if (m_sunk && xdgParent() != nullptr && m_workspace != nullptr) {
+        (void)m_workspace->unwindTo(this);
+      }
+      if (View* parent = xdgParent(); parent != nullptr && parent->sunk() && parent->workspace() != nullptr) {
+        (void)parent->workspace()->unwindTo(parent);
+      }
       if (inheritScratchpadFromParent(m_tiled) && !scratchpadOwnsOpeningGeometry()) {
         placeInUsableArea(m_initialRules.defaultPosition);
         if (ScratchpadManager* scratchpad = m_server->scratchpadManager()) {
@@ -3768,7 +3848,8 @@ namespace umbriel {
   void View::togglePinned() { setPinned(!m_pinned, true); }
 
   void View::setPinned(bool pinned, bool focus) {
-    if (!m_mapped
+    if (m_sunk
+        || !m_mapped
         || !m_toplevel->base->initialized
         || (pinned && (m_toplevel->scheduled.fullscreen || m_toplevel->current.fullscreen))
         || pinned == m_pinned) {
@@ -3812,7 +3893,7 @@ namespace umbriel {
   }
 
   void View::setFloating(bool floating, bool focus, TilePlacement placement) {
-    if (!m_mapped || !m_toplevel->base->initialized) {
+    if (m_sunk || !m_mapped || !m_toplevel->base->initialized) {
       return;
     }
     kLog.debug(
@@ -4072,18 +4153,18 @@ namespace umbriel {
       wlr_scene_node_reparent(&m_sceneTree->node, homeTree());
       raiseToTop();
       // Snap scroll to the now viewport-wide column and reflow neighbors.
-      if (m_workspace != nullptr) {
+      if (m_workspace != nullptr && !m_sunk) {
         m_workspace->snapVisible(this);
         // arrange() sends the full-output size even when this workspace is hidden.
         m_workspace->markArrange(true);
       }
-      if (!m_tiled || m_workspace == nullptr) {
+      if (m_sunk || !m_tiled || m_workspace == nullptr) {
         // Floating fullscreen is not part of the layout; size it directly.
         applyFullscreenLayout(true);
       }
     } else {
       wlr_scene_node_reparent(&m_sceneTree->node, homeTree());
-      if (!m_tiled && m_workspace != nullptr) {
+      if (!m_sunk && !m_tiled && m_workspace != nullptr) {
         m_workspace->restackFloatingViews();
       } else {
         raiseToTop();
@@ -4110,7 +4191,7 @@ namespace umbriel {
     }
     if (!fullscreen) {
       // scheduled.fullscreen is already false; arrange into usable area (exclusive zones).
-      if (m_tiled && m_workspace != nullptr) {
+      if (m_tiled && m_workspace != nullptr && !m_sunk) {
         if (exitLayout == FullscreenExitLayout::Immediate) {
           // wlroots has already scheduled the fullscreen-state configure. Arrange synchronously so its size is
           // replaced with the restored tile before that configure is sent, keeping state and geometry in one client
@@ -4121,7 +4202,7 @@ namespace umbriel {
           // A compound transition, such as floating or maximize-to-edges, sets its final geometry after this returns.
           m_workspace->markArrange(true);
         }
-      } else if (!restoreFloating) {
+      } else if (!restoreFloating && !m_sunk) {
         placeInUsableArea();
       }
     }
@@ -4134,6 +4215,9 @@ namespace umbriel {
       Output* output = m_workspace->group()->output();
       output->updateVrr();
       output->updateHdr();
+      if (m_sunk) {
+        m_workspace->refreshSinkPresentation(true);
+      }
     }
     if (unpinning) {
       if (Overview* overview = m_server->overview(); overview != nullptr && overview->active()) {

@@ -500,7 +500,7 @@ namespace umbriel {
   }
 
   bool Cursor::beginMove(View* view, uint32_t button) {
-    if (view == nullptr || !view->mapped() || button == 0) {
+    if (view == nullptr || !view->mapped() || view->sunk() || button == 0) {
       return false;
     }
     if (!isPassthrough()) {
@@ -551,7 +551,7 @@ namespace umbriel {
   }
 
   bool Cursor::beginResize(View* view, uint32_t edges, uint32_t button) {
-    if (view == nullptr || !view->mapped() || button == 0) {
+    if (view == nullptr || !view->mapped() || view->sunk() || button == 0) {
       return false;
     }
     if (!isPassthrough()) {

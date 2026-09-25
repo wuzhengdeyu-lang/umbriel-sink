@@ -519,6 +519,28 @@ namespace umbriel {
         int offsetY = 2;
         bool operator==(const Shadow&) const = default;
       } shadow;
+      struct Sink {
+        struct Level {
+          double scale = 0.85;
+          double opacity = 0.0;
+          double blurStrength = 1.0;
+          bool operator==(const Level&) const = default;
+        };
+        int visibleDepth = 2;
+        std::array<Level, 4> levels{{
+            {.scale = 0.93, .opacity = 0.82, .blurStrength = 0.5},
+            {.scale = 0.85, .opacity = 0.45, .blurStrength = 1.0},
+            {.scale = 0.77, .opacity = 0.25, .blurStrength = 1.0},
+            {.scale = 0.69, .opacity = 0.14, .blurStrength = 1.0},
+        }};
+        // Experimental until P4's real-GPU budget is measured. Scale and
+        // opacity remain the complete fallback when this is disabled or the
+        // renderer rejects the built-in shaders.
+        bool selfBlur = false;
+        int blurRadius = 6;
+        int blurSamples = 9;
+        bool operator==(const Sink&) const = default;
+      } sink;
       bool preferNoCsd = true;
 
       [[nodiscard]] int totalBorderWidth() const { return borderWidth + outerBorderWidth; }

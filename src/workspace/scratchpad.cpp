@@ -196,7 +196,7 @@ namespace umbriel {
         || m_shadowRoot == nullptr) {
       return false;
     }
-    if (view == nullptr || !view->mapped()) {
+    if (view == nullptr || !view->mapped() || view->sunk()) {
       return false;
     }
 

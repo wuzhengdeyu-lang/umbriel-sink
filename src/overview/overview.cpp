@@ -20,6 +20,7 @@ extern "C" {
 #include "scene/color.h"
 #include "scene/hint_rect.h"
 #include "scene/text_buffer.h"
+#include "scene/window_projection.h"
 #include "server/server.h"
 #include "server/wine_color_manager.h"
 #include "view/view.h"
@@ -189,17 +190,16 @@ namespace umbriel {
 
   void Overview::layoutCard(Card& card, const PreviewMetrics& metrics, double workspaceScroll, const View* liveTarget) {
     View* view = card.view;
-    view->syncAnimationShaders(card.tree, card.border != nullptr ? &card.border->node : nullptr);
     const wlr_box& geometry = view->toplevel()->base->geometry;
     if (geometry.width <= 0 || geometry.height <= 0) {
-      card.blur.hide();
+      card.projection->setEnabled(false);
       wlr_scene_node_set_enabled(&card.tree->node, false);
       return;
     }
     wlr_scene_node_set_enabled(&card.tree->node, true);
     // A tiled opener waiting for the reflow that made room for it is not showing yet. Its card follows.
     if (view->tiledOpeningDeferred()) {
-      card.blur.hide();
+      card.projection->setEnabled(false);
       wlr_scene_node_set_enabled(&card.tree->node, false);
       return;
     }
@@ -207,7 +207,7 @@ namespace umbriel {
     const double z = metrics.zoom;
     const wlr_box& world = view->presentedBox();
     if (world.width <= 0 || world.height <= 0) {
-      card.blur.hide();
+      card.projection->setEnabled(false);
       wlr_scene_node_set_enabled(&card.tree->node, false);
       return;
     }
@@ -231,29 +231,11 @@ namespace umbriel {
     // what keeps them off the neighbouring monitor.
     wlr_scene_tree_set_clip(card.tree, nullptr);
     const float cardOpacity = &card == m_dragCard ? config().appearance.dragOpacity : 1.0F;
-    const float presentedOpacity = view->presentedOpacity() * cardOpacity;
-
-    const auto& appearance = config().appearance;
-    const int total = appearance.totalBorderWidth();
-    const bool decorated = total > 0 && !view->toplevel()->current.fullscreen && !view->maximizedToEdges();
-    const int scaledRadius = static_cast<int>(std::lround(appearance.cornerRadius * z));
-    const int outerRadius = decorated ? scaledRadius : 0;
-    const auto scaledWidth = [z](int width) {
-      return width > 0 ? std::max(1, static_cast<int>(std::lround(width * z))) : 0;
-    };
-    const int innerWidth = scaledWidth(appearance.borderWidth);
-    const int outerWidth = scaledWidth(appearance.outerBorderWidth);
-    const int surfaceRadius = nestedRadius(outerRadius, innerWidth + outerWidth);
-    const bool borderVisible = decorated && innerWidth + outerWidth > 0;
-    wlr_scene_node_set_enabled(&card.border->node, borderVisible);
-    if (borderVisible) {
-      applyBorderGeometry(
-          card.border, makeBorderRing(contentW, contentH, outerRadius, innerWidth, outerWidth), innerWidth, outerWidth
-      );
-      const std::array<float, 4> innerColor = tint(cardBorderColor(card, liveTarget), presentedOpacity);
-      const std::array<float, 4> outerColor = tint(config().colors.border.outer, presentedOpacity);
-      wlr_scene_border_set_colors(card.border, innerColor.data(), outerColor.data());
-    }
+    card.projection->setBox({.x = 0, .y = 0, .width = contentW, .height = contentH});
+    card.projection->setOpacity(cardOpacity);
+    card.projection->setBorderColor(cardBorderColor(card, liveTarget));
+    card.projection->setEnabled(true);
+    const int scaledRadius = static_cast<int>(std::lround(config().appearance.cornerRadius * z));
 
     if (card.badge != nullptr) {
       // Overshooting curves can push m_progress past [0, 1] and wlr_scene_buffer_set_opacity asserts.
@@ -291,75 +273,6 @@ namespace umbriel {
             card.badgeRect, std::min(scaledRadius, std::min(card.badgeWidth, card.badgeHeight) / 2)
         );
       }
-    }
-
-    // Every surface of the card rounds against the card's content box, the same rule the live window uses, so a
-    // client that draws its corners from a subsurface keeps them rounded in the thumbnail.
-    const auto roundToCardBox = [surfaceRadius, contentW, contentH](wlr_scene_buffer* buffer) {
-      const wlr_box cornerBox{-buffer->node.x, -buffer->node.y, contentW, contentH};
-      wlr_scene_buffer_set_corner_radii(buffer, corner_radii_all(surfaceRadius));
-      wlr_scene_buffer_set_corner_box(buffer, surfaceRadius > 0 ? &cornerBox : nullptr);
-    };
-    const double fx = static_cast<double>(contentW) / geometry.width;
-    const double fy = static_cast<double>(contentH) / geometry.height;
-    bool blurUpdated = false;
-    for (const auto& entry : card.surfaces) {
-      wlr_surface* surface = entry->surface;
-      if (entry->buffer == nullptr || surface->current.width <= 0 || surface->current.height <= 0) {
-        continue;
-      }
-      const float surfaceOpacity =
-          entry->sourceBuffer != nullptr ? entry->sourceBuffer->opacity * cardOpacity : cardOpacity;
-      wlr_scene_buffer_set_opacity(entry->buffer, surfaceOpacity);
-      if (!entry->isRoot) {
-        wlr_box sub{
-            card.box.x + static_cast<int>(std::lround((entry->sx - geometry.x) * fx)),
-            card.box.y + static_cast<int>(std::lround((entry->sy - geometry.y) * fy)),
-            std::max(1, static_cast<int>(std::lround(surface->current.width * fx))),
-            std::max(1, static_cast<int>(std::lround(surface->current.height * fy))),
-        };
-        wlr_scene_node_set_enabled(&entry->buffer->node, true);
-        wlr_scene_node_set_position(&entry->buffer->node, sub.x - card.box.x, sub.y - card.box.y);
-        wlr_scene_buffer_set_dest_size(entry->buffer, sub.width, sub.height);
-        roundToCardBox(entry->buffer);
-        continue;
-      }
-      // Root surface: crop to the committed window geometry so CSD shadow padding never leaks into the thumbnail, then
-      // scale the visible part of that region onto the card.
-      wlr_fbox base{};
-      wlr_surface_get_buffer_source_box(surface, &base);
-      const double bx = base.width / surface->current.width;
-      const double by = base.height / surface->current.height;
-      wlr_fbox src{base.x + geometry.x * bx, base.y + geometry.y * by, geometry.width * bx, geometry.height * by};
-      if (src.x < base.x) {
-        src.width -= base.x - src.x;
-        src.x = base.x;
-      }
-      if (src.y < base.y) {
-        src.height -= base.y - src.y;
-        src.y = base.y;
-      }
-      src.width = std::min(src.width, base.x + base.width - src.x);
-      src.height = std::min(src.height, base.y + base.height - src.y);
-      if (src.width <= 0 || src.height <= 0) {
-        wlr_scene_node_set_enabled(&entry->buffer->node, false);
-        continue;
-      }
-      wlr_scene_node_set_enabled(&entry->buffer->node, true);
-      wlr_scene_node_set_position(&entry->buffer->node, 0, 0);
-      wlr_scene_buffer_set_source_box(entry->buffer, &src);
-      wlr_scene_buffer_set_dest_size(entry->buffer, contentW, contentH);
-      roundToCardBox(entry->buffer);
-      const wlr_box blurBox{0, 0, contentW, contentH};
-      card.blur.setAlpha(1.0F);
-      card.blur.update(
-          card.tree, surface, blurBox, geometry, surfaceRadius, nullptr, view->blurOptions(), entry->buffer->opacity,
-          entry->buffer
-      );
-      blurUpdated = true;
-    }
-    if (!blurUpdated) {
-      card.blur.hide();
     }
   }
 
@@ -717,170 +630,6 @@ namespace umbriel {
 
   // -: cards
 
-  void Overview::syncCardBuffer(CardSurface& entry) {
-    wlr_surface* surface = entry.surface;
-    if (surface == nullptr || entry.buffer == nullptr) {
-      return;
-    }
-
-    wlr_scene_buffer_set_buffer_options options{
-        .damage = &surface->buffer_damage,
-        .wait_timeline = nullptr,
-        .wait_point = 0,
-    };
-    if (wlr_linux_drm_syncobj_surface_v1_state* sync = wlr_linux_drm_syncobj_v1_get_surface_state(surface)) {
-      options.wait_timeline = sync->acquire_timeline;
-      options.wait_point = sync->acquire_point;
-    }
-    // A scene buffer may clear its `buffer` pointer after importing a texture and releasing the client buffer. The
-    // surface retains the authoritative committed buffer, including for hidden workspaces.
-    wlr_buffer* committed = surface->buffer != nullptr ? &surface->buffer->base : nullptr;
-    if (committed == nullptr) {
-      options.damage = nullptr;
-    }
-    wlr_scene_buffer_set_buffer_with_options(entry.buffer, committed, &options);
-
-    // Presentation state comes from the surface's committed state, NEVER from the view's scene buffers: workspace
-    // slides clip those (applyPresentation → applyPresentedCrop), and a window parked on a hidden workspace keeps the
-    // sliver crop. Copying it smears subsurface-presented content (games) into a single stretched line. layoutCard then
-    // re-crops the root surface and re-scales every entry for the thumbnail.
-    wlr_fbox src{};
-    wlr_surface_get_buffer_source_box(surface, &src);
-    wlr_scene_buffer_set_source_box(entry.buffer, &src);
-    wlr_scene_buffer_set_dest_size(entry.buffer, surface->current.width, surface->current.height);
-    wlr_scene_buffer_set_transform(entry.buffer, surface->current.transform);
-    wlr_scene_buffer_set_opaque_region(entry.buffer, &surface->opaque_region);
-
-    // Protocol-derived display properties (alpha-modifier, color management)
-    // are clip-independent, so the view's scene buffer is a safe source.
-    if (wlr_scene_buffer* source = entry.sourceBuffer) {
-      wlr_scene_buffer_set_opacity(entry.buffer, source->opacity);
-      wlr_scene_buffer_set_transfer_function(entry.buffer, source->transfer_function);
-      wlr_scene_buffer_set_primaries(entry.buffer, source->primaries);
-      wlr_scene_buffer_set_luminance_multiplier(entry.buffer, source->luminance_multiplier);
-      wlr_scene_buffer_set_color_encoding(entry.buffer, source->color_encoding);
-      wlr_scene_buffer_set_color_range(entry.buffer, source->color_range);
-    }
-    // wlroots restores scene surfaces to its protocol-owned color state on
-    // every commit. Wine compatibility metadata is repaired at the render
-    // boundary, after this passive mirror has copied the transient state, so
-    // apply the authoritative committed description directly to the mirror.
-    if (WineColorManager* colorManager = entry.card->overview->m_server->wineColorManager()) {
-      colorManager->applySurfaceDescriptionToBuffer(surface, entry.buffer);
-    }
-  }
-
-  void Overview::addCardSurface(wlr_surface* surface, int sx, int sy, void* data) {
-    auto* card = static_cast<Card*>(data);
-    wlr_scene_buffer* source = sourceBufferForSurface(&card->view->sceneTree()->node, surface);
-    if (source == nullptr) {
-      return;
-    }
-    wlr_scene_buffer* buffer = wlr_scene_buffer_create(card->tree, nullptr);
-    if (buffer == nullptr) {
-      return;
-    }
-    auto entry = std::make_unique<CardSurface>();
-    entry->card = card;
-    entry->surface = surface;
-    entry->sourceBuffer = source;
-    entry->buffer = buffer;
-    entry->sx = sx;
-    entry->sy = sy;
-    entry->isRoot = surface == card->view->toplevel()->base->surface;
-    wlr_scene_buffer_set_filter_mode(buffer, WLR_SCALE_FILTER_BILINEAR);
-    buffer->point_accepts_input = rejectInput;
-    entry->commit.notify = onCardSurfaceCommit;
-    wl_signal_add(&surface->events.commit, &entry->commit);
-    entry->destroy.notify = onCardSurfaceDestroy;
-    wl_signal_add(&surface->events.destroy, &entry->destroy);
-    entry->outputSample.notify = onCardBufferOutputSample;
-    wl_signal_add(&buffer->events.output_sample, &entry->outputSample);
-    entry->frameDone.notify = onCardBufferFrameDone;
-    wl_signal_add(&buffer->events.frame_done, &entry->frameDone);
-    syncCardBuffer(*entry);
-    card->surfaces.push_back(std::move(entry));
-    if (card->border != nullptr) {
-      wlr_scene_node_raise_to_top(&card->border->node);
-    }
-    if (card->badge != nullptr) {
-      wlr_scene_node_raise_to_top(&card->badge->node);
-    }
-  }
-
-  void Overview::syncCardSurface(wlr_surface* surface, int sx, int sy, void* data) {
-    auto* card = static_cast<Card*>(data);
-    for (const auto& entry : card->surfaces) {
-      if (entry->surface == surface) {
-        entry->sx = sx;
-        entry->sy = sy;
-        syncCardBuffer(*entry);
-        return;
-      }
-    }
-    addCardSurface(surface, sx, sy, data);
-  }
-
-  void Overview::onCardSurfaceCommit(wl_listener* listener, void* /*data*/) {
-    CardSurface* entry;
-    entry = wl_container_of(listener, entry, commit);
-    Card* card = entry->card;
-    Overview* self = card->overview;
-    if (!self->m_active || card->owner == nullptr) {
-      return;
-    }
-    // The source scene surface reconfigures on every commit. Refresh the
-    // passive buffer mirrors, then re-derive their overview crop and scale.
-    wlr_surface_for_each_surface(card->view->toplevel()->base->surface, syncCardSurface, card);
-    PreviewMetrics metrics{};
-    if (previewMetrics(*card->owner, *self->m_server, self->zoom(), metrics)) {
-      self->layoutCard(*card, metrics, card->owner->rowScroll.current(), self->liveTargetView());
-      wlr_output_schedule_frame(card->owner->output->wlr());
-    }
-  }
-
-  void Overview::onCardSurfaceDestroy(wl_listener* listener, void* /*data*/) {
-    CardSurface* entry;
-    entry = wl_container_of(listener, entry, destroy);
-    Card* card = entry->card;
-    wl_list_remove(&entry->commit.link);
-    wl_list_remove(&entry->destroy.link);
-    wl_list_remove(&entry->outputSample.link);
-    wl_list_remove(&entry->frameDone.link);
-    if (entry->buffer != nullptr) {
-      wlr_scene_node_destroy(&entry->buffer->node);
-      entry->buffer = nullptr;
-    }
-    std::erase_if(card->surfaces, [entry](const std::unique_ptr<CardSurface>& candidate) {
-      return candidate.get() == entry;
-    });
-  }
-
-  void Overview::onCardBufferOutputSample(wl_listener* listener, void* data) {
-    CardSurface* entry;
-    entry = wl_container_of(listener, entry, outputSample);
-    auto* event = static_cast<wlr_scene_output_sample_event*>(data);
-    wlr_output* output = event->output->output;
-    if (event->direct_scanout) {
-      wlr_presentation_surface_scanned_out_on_output(entry->surface, output);
-    } else {
-      wlr_presentation_surface_textured_on_output(entry->surface, output);
-    }
-    if (wlr_linux_drm_syncobj_surface_v1_state* sync = wlr_linux_drm_syncobj_v1_get_surface_state(entry->surface);
-        sync != nullptr && event->release_timeline != nullptr) {
-      wlr_linux_drm_syncobj_v1_state_add_release_point(
-          sync, event->release_timeline, event->release_point, output->event_loop
-      );
-    }
-  }
-
-  void Overview::onCardBufferFrameDone(wl_listener* listener, void* data) {
-    CardSurface* entry;
-    entry = wl_container_of(listener, entry, frameDone);
-    auto* event = static_cast<wlr_scene_frame_done_event*>(data);
-    wlr_surface_send_frame_done(entry->surface, &event->when);
-  }
-
   Overview::Card* Overview::createCard(OutputState& state, View* view, size_t workspaceIndex) {
     if (view == nullptr || !view->mapped() || view->pinned()) {
       return nullptr;
@@ -898,18 +647,29 @@ namespace umbriel {
     if (card->tree == nullptr) {
       return nullptr;
     }
-    const std::array<float, 4> innerColor = tint(config().colors.border.unfocused, 1.0);
-    const std::array<float, 4> outerColor = tint(config().colors.border.outer, 1.0);
-    card->border = wlr_scene_border_create(card->tree, innerColor.data(), outerColor.data());
-    if (card->border == nullptr) {
-      wlr_scene_node_destroy(&card->tree->node);
+    Card* raw = card.get();
+    raw->projection = std::make_unique<WindowProjection>(
+        *m_server, *view, raw->tree,
+        [raw] {
+          Overview* self = raw->overview;
+          if (self == nullptr || !self->m_active || raw->owner == nullptr) {
+            return;
+          }
+          PreviewMetrics metrics{};
+          if (previewMetrics(*raw->owner, *self->m_server, self->zoom(), metrics)) {
+            self->layoutCard(*raw, metrics, raw->owner->rowScroll.current(), self->liveTargetView());
+            wlr_output_schedule_frame(raw->owner->output->wlr());
+          }
+        },
+        true
+    );
+    if (raw->projection->tree() == nullptr) {
+      raw->projection.reset();
+      wlr_scene_node_destroy(&raw->tree->node);
       return nullptr;
     }
-    Card* raw = card.get();
     state.cards.push_back(std::move(card));
     m_shortcutsDirty = true;
-
-    wlr_surface_for_each_surface(surface, addCardSurface, raw);
 
     // Animation schedules the first output frame. The passive card buffers then
     // pace clients from frames where their content was actually sampled.
@@ -931,67 +691,18 @@ namespace umbriel {
       wlr_scene_tree_set_clip(snapshot, &outputBox);
     }
 
-    int buffersCopied = 0;
-    for (const auto& entry : card.surfaces) {
-      wlr_scene_buffer* source = entry->buffer;
-      if (source == nullptr || source->buffer == nullptr || !source->node.enabled) {
-        continue;
-      }
-      wlr_scene_buffer* copy = wlr_scene_buffer_create(snapshot, source->buffer);
-      if (copy == nullptr) {
-        continue;
-      }
-      wlr_scene_node_set_position(&copy->node, card.tree->node.x + source->node.x, card.tree->node.y + source->node.y);
-      if (source->dst_width > 0 && source->dst_height > 0) {
-        wlr_scene_buffer_set_dest_size(copy, source->dst_width, source->dst_height);
-      }
-      if (source->src_box.width > 0 && source->src_box.height > 0) {
-        wlr_scene_buffer_set_source_box(copy, &source->src_box);
-      }
-      wlr_scene_buffer_set_transform(copy, source->transform);
-      wlr_scene_buffer_set_corner_radii(copy, source->corners);
-      wlr_scene_buffer_set_corner_box(copy, &source->corner_box);
-      wlr_scene_buffer_set_opacity(copy, source->opacity);
-      wlr_scene_buffer_set_transfer_function(copy, source->transfer_function);
-      wlr_scene_buffer_set_primaries(copy, source->primaries);
-      wlr_scene_buffer_set_luminance_multiplier(copy, source->luminance_multiplier);
-      wlr_scene_buffer_set_color_encoding(copy, source->color_encoding);
-      wlr_scene_buffer_set_color_range(copy, source->color_range);
-      wlr_scene_buffer_set_filter_mode(copy, WLR_SCALE_FILTER_BILINEAR);
-      ++buffersCopied;
-    }
-
     std::vector<BorderSnapshot> borders;
-    if (card.border != nullptr && card.border->node.enabled) {
-      wlr_scene_border* copy = wlr_scene_border_create(snapshot, card.border->inner_color, card.border->outer_color);
-      if (copy != nullptr) {
-        wlr_scene_border_set_geometry(
-            copy, card.border->width, card.border->height, card.border->inner_width, card.border->outer_width,
-            card.border->clipped_region, card.border->seam_corners, card.border->outer_corners
-        );
-        wlr_scene_node_set_position(
-            &copy->node, card.tree->node.x + card.border->node.x, card.tree->node.y + card.border->node.y
-        );
-        std::array<float, 4> innerColor = cardBorderColor(card, liveTargetView());
-        std::array<float, 4> outerColor = config().colors.border.outer;
-        const float presentedOpacity = card.view->presentedOpacity();
-        innerColor[3] *= presentedOpacity;
-        outerColor[3] *= presentedOpacity;
-        borders.push_back(
-            BorderSnapshot{
-                .node = copy,
-                .innerColor = innerColor,
-                .outerColor = outerColor,
-            }
-        );
-      }
-    }
+    const int buffersCopied = card.projection != nullptr
+        ? card.projection->snapshot(snapshot, card.tree->node.x, card.tree->node.y, borders)
+        : 0;
 
     if (buffersCopied == 0 && borders.empty()) {
       wlr_scene_node_destroy(&snapshot->node);
       return;
     }
-    wlr_scene_node_copy_animations_for_snapshot(&snapshot->node, &card.tree->node);
+    wlr_scene_node_copy_animations_for_snapshot(
+        &snapshot->node, card.projection != nullptr ? &card.projection->tree()->node : &card.tree->node
+    );
     // The frozen card owns its captured geometry and windows_out lifecycle. Retain an interrupted windows_in effect,
     // but do not carry the live card's windows_move effect into the close snapshot.
     wlr_scene_node_set_animation(&snapshot->node, static_cast<unsigned>(AnimationEvent::WindowsMove), nullptr, nullptr);
@@ -1000,18 +711,11 @@ namespace umbriel {
   }
 
   void Overview::destroyCard(Card* card) {
-    for (const auto& entry : card->surfaces) {
-      wl_list_remove(&entry->commit.link);
-      wl_list_remove(&entry->destroy.link);
-      wl_list_remove(&entry->outputSample.link);
-      wl_list_remove(&entry->frameDone.link);
-    }
-    card->surfaces.clear();
+    card->projection.reset();
     if (card->tree != nullptr) {
       wlr_scene_node_destroy(&card->tree->node);
       card->tree = nullptr;
     }
-    card->border = nullptr;
   }
 
   void Overview::dropCard(View* view) {
@@ -1485,7 +1189,7 @@ namespace umbriel {
       // Overview focus keeps keyboard input withheld, but it updates the workspace and starts any scrolling-column
       // reveal. Begin it before the closing zoom so both animations receive their first tick together. finishAnimation
       // repeats the focus after teardown to deliver keyboard focus once the real trees own input again.
-      m_server->focusView(focus, FocusReason::PointerPress);
+      m_server->focusView(focus, FocusReason::OverviewSelection);
     }
     beginClose(focus);
   }
@@ -1629,7 +1333,7 @@ namespace umbriel {
       }
     }
     if (focus != nullptr && focus->mapped()) {
-      m_server->focusView(focus, FocusReason::PointerPress);
+      m_server->focusView(focus, FocusReason::OverviewSelection);
     } else {
       m_server->refocus();
     }
@@ -2849,7 +2553,7 @@ namespace umbriel {
     Card* card = m_pressCard;
     m_pressCard = nullptr;
     m_pressWorkspace = nullptr;
-    if (card == nullptr || card->view == nullptr || !card->view->mapped()) {
+    if (card == nullptr || card->view == nullptr || !card->view->mapped() || card->view->sunk()) {
       return;
     }
     View* view = card->view;
