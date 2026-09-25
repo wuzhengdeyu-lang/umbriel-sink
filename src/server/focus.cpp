@@ -39,6 +39,10 @@ namespace umbriel {
         return "xdg-activation";
       case FocusReason::ForeignActivation:
         return "foreign-activation";
+      case FocusReason::OverviewSelection:
+        return "overview-selection";
+      case FocusReason::SinkPull:
+        return "sink-pull";
       }
       return "unknown";
     }
@@ -46,6 +50,22 @@ namespace umbriel {
 
   void FocusManager::focusView(View* view, FocusReason reason) {
     if (view == nullptr || m_server.sessionLocked()) {
+      return;
+    }
+
+    if (view->sunk()) {
+      const bool explicitActivation = reason == FocusReason::XdgActivation
+          || reason == FocusReason::ForeignActivation
+          || reason == FocusReason::OverviewSelection;
+      Workspace* workspace = view->workspace();
+      if (!explicitActivation || workspace == nullptr || !workspace->unwindTo(view)) {
+        return;
+      }
+    }
+    if (view->projectionOwnsPresentation()) {
+      if (Workspace* workspace = view->workspace()) {
+        workspace->deferProjectionFocus(view);
+      }
       return;
     }
 
@@ -129,6 +149,8 @@ namespace umbriel {
     case FocusReason::Startup:
     case FocusReason::XdgActivation:
     case FocusReason::ForeignActivation:
+    case FocusReason::OverviewSelection:
+    case FocusReason::SinkPull:
       workspace->activateFocusedColumn();
       workspace->markArrange(true);
       break;
@@ -188,7 +210,7 @@ namespace umbriel {
     };
 
     if (View* view = View::fromSurface(focusedSurface)) {
-      if (!view->mapped() || (!view->onActiveWorkspace() && !view->pinned())) {
+      if (!view->mapped() || view->sunk() || (!view->onActiveWorkspace() && !view->pinned())) {
         return false;
       }
 
@@ -288,13 +310,13 @@ namespace umbriel {
         return false;
       }
       if (View* focused = workspace->focusedView()) {
-        if (focused->mapped() && focused->onActiveWorkspace()) {
+        if (focused->mapped() && !focused->sunk() && focused->onActiveWorkspace()) {
           focusView(focused);
           return true;
         }
       }
       for (const auto& entry : m_server.registry().all()) {
-        if (entry->mapped() && entry->workspace() == workspace) {
+        if (entry->mapped() && !entry->sunk() && entry->workspace() == workspace) {
           focusView(entry.get());
           return true;
         }
@@ -397,7 +419,7 @@ namespace umbriel {
     auto* view = static_cast<View*>(sceneNode);
     // Workspace transitions and scratchpad fade-outs keep an inactive view's scene enabled until the animation
     // finishes. They are visual snapshots, not interactive windows.
-    if (!view->pinned() && !view->onActiveWorkspace()) {
+    if (view->sunk() || (!view->pinned() && !view->onActiveWorkspace())) {
       *surface = nullptr;
       return nullptr;
     }

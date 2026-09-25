@@ -1,252 +1,162 @@
-# Umbriel
+**Language / 语言:** [English](README.md) | [简体中文](README-CN.md)
 
-Umbriel is a Wayland compositor designed for daily use, with scrolling, dwindle, and master layouts, per-output
-workspaces, window rules, blur, shadows, and fluid animations.
+# Umbriel Sink
 
-It runs independently and can be paired with [Noctalia](https://github.com/noctalia-dev/noctalia), which provides a
-first-class desktop shell experience for Umbriel. Umbriel is built in C++23 on
-[wlroots](https://gitlab.freedesktop.org/wlroots/wlroots) and `umbrielfx`, its own hard fork of
-[SceneFX](https://github.com/wlrfx/scenefx). Xwayland support comes from
-[xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite), which must be
-installed and on `PATH`. Portal screen capture and sharing is provided by
-[xdg-desktop-portal-umbriel](https://github.com/noctalia-dev/xdg-desktop-portal-umbriel), an
-xdg-desktop-portal backend for Umbriel.
+Umbriel Sink is an experiment in tiled desktop interaction, inspired by [this talk on desktop UX](https://www.youtube.com/watch?v=V7AfAcQwLW0).
+It explores a complement to tiling: how can a desktop preserve and represent the work context someone has just left,
+letting it leave the active work surface without disappearing entirely from their cognitive space?
 
-> [!IMPORTANT]
-> Umbriel is young and actively evolving. It is usable today, but configuration keys, keybinds, and behavior may change
-> between releases, and rough edges remain. Current defaults are opinions, not stability promises.
+The project narrows that question to **suspending and resuming short-term work context**. It uses
+[Umbriel](README-UMBRIEL.md) as an experimental platform and offers one concrete answer through a reversible
+Sink/Pull depth stack. This is not an official Noctalia project; the upstream overview, standard build instructions,
+and dependencies remain in [README-UMBRIEL.md](README-UMBRIEL.md).
 
-<p align="center">
-  <img src="https://assets.noctalia.dev/?file=umbriel.svg" alt="Umbriel Logo" style="width: 192px" />
-</p>
+> **AI involvement:** AI (OpenAI Codex) participated in writing and modifying this fork's Sink/Pull implementation,
+> related tests and scripts, and this document. Please review it against your own hardware and workflow.
+> The original upstream Umbriel code should not be attributed to this fork or to AI.
 
-<p align="center">
-  <a href="https://docs.noctalia.dev/umbriel/">
-    <img src="https://img.shields.io/badge/docs-fbf099?style=for-the-badge&logo=gitbook&logoColor=110f3d&labelColor=fbf099" alt="Documentation" />
-  </a>
-  <a href="https://discord.noctalia.dev">
-    <img src="https://img.shields.io/badge/discord-fbf099?style=for-the-badge&logo=discord&logoColor=110f3d&labelColor=fbf099" alt="Discord" />
-  </a>
-</p>
+## What Sink does
 
-## Why Umbriel?
+- `window-sink` pushes the focused window onto its Workspace's stack; `window-pull` restores the most recently sunk
+  window (last in, first out).
+- A sunk window retains its underlying tiled or floating placement, applicable window states, and Workspace occupancy,
+  but no longer receives ordinary input or focus. The compositor projects the whole window to express depth without
+  asking the client to resize merely for the visual effect.
+- The top two entries are visible by default: depth 0 uses `0.93` scale and `0.82` opacity; depth 1 uses `0.85`
+  scale and `0.45` opacity. Deeper windows remain in the logical stack but are beyond the default visibility horizon.
+- Pull returns the projection to its normal position and restores focus after a compatible client commit. Explicitly
+  activating a sunk window, or selecting it in Overview, can unwind the stack through that window.
+- `visible_depth` sets the number of visible layers from 1 to 4; `levels` controls each layer's scale, opacity,
+  and Self Blur strength. Self Blur is optional and off by default.
 
-When people ask what Umbriel's selling point is, the honest answer is that there is no single killer feature. We were
-simply disappointed with the choices available to us, so we built the compositor we wanted to live in. The plan is
-not to conquer the world or take over the big names; it is to feel at home with something we have a say in, with less
-friction. That is exactly how Noctalia came to life, and Umbriel is its compositor side.
+![Umbriel Sink desktop demonstration](docs/media/sink_demonstration.png)
 
-To understand the values and philosophy guiding the project, read our [ethos](https://noctalia.dev/ethos).
+## Quick start
 
-## Features
+After installing the separate session below, select **Umbriel Sink** at the login screen. An independently installed
+official **Umbriel** session remains available. Building this repository alone does not update an installed session.
 
-- Scrolling, dwindle, and master layouts with per-workspace selection, width presets, animated navigation, and
-  mouse-driven resizing and tiled reordering
-- Independent workspaces per output, with hotplug support and configurable modes, positions, scales, and transforms
-- Floating, pinned, and fullscreen windows with configurable placement, focus, sizing, opacity, and visual effects
-- [Global named scratchpads](docs/user/scratchpad.md) for temporarily hiding
-  window groups and summoning them on any output
-- An animated overview, directional focus, configurable keybinds, submaps, and activation policy
-- Blur, shadows, rounded corners, double borders, opacity, and animated position, size, and fade transitions
-- Keyboard, pointer, touch, touchpad gestures, XKB configuration, and text-input-v3/input-method-v2 input method support
-- [Restricted Wayland connections](docs/user/security.md) for sandbox engines through security-context-v1, with
-  per-application protocol grants
-- Layer shell, session locking, clipboard management, screen capture, output control, and gamma control
-- X11 application support through xwayland-satellite, when xwayland-satellite is installed and on `PATH`
-- Live-reloaded TOML configuration with diagnostics and includes, plus local IPC and runtime inspection commands
-- Runs as a nested Wayland compositor inside an existing Wayland or X11 desktop for development, or directly on DRM
-  for daily use
+Add unused keybindings to the fork-only configuration at `~/.config/umbriel-sink/config.toml`, for example:
 
-## Building
+```toml
+[include]
+files = ["../umbriel/config.toml"]
 
-Distribution maintainers should also read [PACKAGING.md](PACKAGING.md) for the
-installed layout, dependency notes, and config fallback.
+[keybinds]
+"Mod+Alt+Down" = "window-sink"
+"Mod+Alt+Up" = "window-pull"
+```
 
-The scene graph and renderer live in [`umbrielfx/`](umbrielfx/) and build as part of the tree.
+If you already have an upstream Umbriel config, the relative `include` inherits its theme, keybindings, and window
+rules. Otherwise, remove `[include]` and start from the [full example config](examples/config.toml). Keep the new
+Sink/Pull bindings in the fork-only file rather than a keybinding file shared by both sessions: upstream Umbriel does
+not recognize these actions. These chords are only examples; check your existing bindings for conflicts.
 
-### System build
-
-Install a C++23 compiler, Meson, Ninja, pkg-config, wayland-scanner, and development packages for wlroots 0.20
-(0.20.1 or newer), Wayland, xkbcommon, libinput, pixman, libdrm, EGL, GLES2, GBM, lcms2, Cairo, Pango, tomlplusplus,
-and nlohmann-json. Native `[drm]` GPU exclusions also require libudev. Then build Umbriel:
+You can also send the actions from a terminal in the separate session without binding keys:
 
 ```sh
-just release
-just install
+~/.local/libexec/umbriel-sink/umbriel-sink msg window-sink
+~/.local/libexec/umbriel-sink/umbriel-sink msg window-pull
+~/.local/libexec/umbriel-sink/umbriel-sink windows --json
 ```
 
-`jemalloc` is optional but recommended on glibc: it returns freed memory to the OS promptly and bounds heap
-fragmentation in long-running sessions. Meson's `-Djemalloc=enabled` or `-Djemalloc=disabled` forces the choice; the
-default (`auto`) uses it when the development package is installed and skips it otherwise (non-glibc libc builds
-always skip it).
+In `windows --json`, `sunk` and `sink_depth` describe logical state. `sink_depth = 0` is the top of the stack;
+logical depth does not guarantee visibility. See the [actions](docs/user/actions.md) and [IPC](docs/user/ipc.md)
+documentation for more detail.
 
-The binaries are written to `build-debug/umbriel` and `build-release/umbriel`.
+## Visible depth and appearance
 
-### Nix
+Add the following to the fork-only configuration. If it already has an `[appearance.sink]` table, add these keys to
+that table instead of declaring it twice:
 
-Build the package directly:
+```toml
+[appearance.sink]
+visible_depth = 2
+levels = [
+  { scale = 0.93, opacity = 0.82, blur_strength = 0.5 },
+  { scale = 0.85, opacity = 0.45, blur_strength = 1.0 },
+]
+self_blur = false
+blur_radius = 6
+blur_samples = 9
+```
+
+`visible_depth = 2` is the recommended default. Omitting `visible_depth` or `levels` also uses these built-in styles.
+If you specify `levels`, provide at least `visible_depth` complete entries: `scale` must be between 0.1 and 1, while
+`opacity` and `blur_strength` must be between 0 and 1. `blur_strength` matters only when `self_blur = true`; it does
+not enable blur by itself. Showing three or four layers, especially with blur, can increase GPU cost. Existing
+performance measurements mainly cover the default two-layer horizon, so they do not establish the cost of extra
+layers. Validate and hot-reload changes with:
 
 ```sh
-nix build
+~/.local/libexec/umbriel-sink/umbriel-sink validate -c ~/.config/umbriel-sink/config.toml
+~/.local/libexec/umbriel-sink/umbriel-sink msg config-reload
 ```
 
-The resulting binary is available at `result/bin/umbriel`. For development, enter the project shell and use the same
-Just recipes as a system build:
+See the [appearance documentation](docs/user/appearance.md) for all defaults and limits.
+
+## Build and separate session files
+
+For a first build, see the upstream [README-UMBRIEL.md](README-UMBRIEL.md#building) for dependencies. The separate
+session uses its own Release build; do not run `just install` to replace an official Umbriel installation:
 
 ```sh
-nix develop
-just debug
+meson setup build-sink-release --buildtype=release -Db_lto=true -Dtests=disabled -Dcpp_std=c++23 --prefix="$HOME/.local"
+meson compile -C build-sink-release umbriel
 ```
 
-### Testing
+If `build-sink-release/` already exists, only the second command is needed. Log out of a running Umbriel Sink session
+before installing a new binary. These are suggested paths for a separate installation, not replacements for the
+official session. The `build*/` directories and `compile_commands.json` are ignored by [`.gitignore`](.gitignore);
+do not commit or force-add build products.
 
-The development shell includes the clients and command-line tools used by the
-test suite. Unit tests and the contained headless compositor harness are two
-commands:
+| Repository file | Suggested installed location / purpose |
+| --- | --- |
+| `build-sink-release/umbriel` | `~/.local/libexec/umbriel-sink/umbriel-sink`, separate compositor binary |
+| [`tools/sink-session/start-umbriel-sink`](tools/sink-session/start-umbriel-sink) | `~/.local/bin/start-umbriel-sink`, login launcher |
+| [`tools/sink-session/umbriel-sink.service`](tools/sink-session/umbriel-sink.service) | `~/.config/systemd/user/umbriel-sink.service`, user service |
+| [`tools/sink-session/umbriel-sink.desktop.in`](tools/sink-session/umbriel-sink.desktop.in) | Login entry template; the user's launcher path is filled in at install time |
+| [`tools/sink-session/install-session-entry.sh`](tools/sink-session/install-session-entry.sh) | Renders the template and installs only the separate login entry with administrator privileges |
+| Fork-only config | `~/.config/umbriel-sink/config.toml`, which may `include` an upstream config |
+
+For a first installation, prepare the fork-only config above, then install the binary, launcher, and user service:
 
 ```sh
-nix develop
-just test                 # unit and umbrielfx suites, through Meson
-just check                # every harness check
+install -Dm755 build-sink-release/umbriel "$HOME/.local/libexec/umbriel-sink/umbriel-sink"
+install -Dm755 tools/sink-session/start-umbriel-sink "$HOME/.local/bin/start-umbriel-sink"
+install -Dm644 tools/sink-session/umbriel-sink.service "$HOME/.config/systemd/user/umbriel-sink.service"
+systemctl --user daemon-reload
 ```
 
-`just check` also takes name fragments, and `just check-names` lists them:
+The login entry is generated from a template; no user's home path is stored in the repository. Preview the rendered
+entry, then install it:
 
 ```sh
-just check 310            # one check
-just check 310 520        # several
-just check overview       # every check in a group
-just check 310 -v         # keep the full output of passing checks
-just mode=asan check 310  # the same check against build-asan
+tools/sink-session/install-session-entry.sh --render
+tools/sink-session/install-session-entry.sh
 ```
 
-Each check gets its own contained headless compositor, so a failure stays local
-and checks run in any order. Every passing check emits a concise completion
-message, summarized to a single dimmed line unless `-v` is enabled; failing
-checks print their whole output. A failing check keeps its runtime directory
-(compositor log, config, per-client logs) and prints the path.
+The script resolves the default launcher under `$HOME` and writes its path to the system session directory only at
+install time. If your launcher lives elsewhere, pass its absolute path without spaces or special characters as an
+argument. The script calls `sudo` but does not overwrite the official session entry. See
+[`tools/sink-session/README.md`](tools/sink-session/README.md) for session isolation and path details. The separate
+entry and service leave the official `umbriel.desktop`, `umbriel.service`, `start-umbriel`, and config untouched.
 
-## Running
+## Code, tests, and status
 
-Installed display-manager sessions start through `start-umbriel`. For supported
-account shells, it loads the noninteractive login environment, then runs the
-compositor as a user service on systemd or directly on other init systems.
-Systemd sessions also inherit `environment.d`.
-
-Start an installed native session from a TTY with:
+The Sink stack and projection are primarily implemented in `src/workspace/sink_stack.h`,
+`src/workspace/sink_presentation.h`, `src/workspace/workspace.cpp`, and `src/scene/window_projection.*`.
+Configuration parsing lives in `src/config/`; Self Blur rendering lives in `umbrielfx/`. Focused harness checks include
+`tests/harness/checks/155_sink_logic.sh`, `156_sink_projection.sh`, `158_sink_self_blur.sh`, and
+`159_sink_performance_matrix.sh`. The real-application smoke-test script is
+[`tests/manual/sink_real_apps.sh`](tests/manual/sink_real_apps.sh).
 
 ```sh
-start-umbriel
+just test debug
+just check 155_sink_logic 156_sink_projection 158_sink_self_blur
 ```
 
-From an existing Wayland or X11 session, Umbriel opens a nested window (mod = Alt).
-From a TTY it takes over the seat (mod = Super).
-
-Apps that capture the screen through xdg-desktop-portal (browser screen sharing, OBS, portal-aware screenshot
-tools) are served by [xdg-desktop-portal-umbriel](https://github.com/noctalia-dev/xdg-desktop-portal-umbriel), which
-implements the Screencast and Screenshot interfaces for Umbriel.
-
-```sh
-just run debug kitty
-```
-
-Or run the binary directly:
-
-```sh
-./build-debug/umbriel -s kitty
-```
-
-Inside the session:
-
-| Shortcut | Action |
-|----------|--------|
-| mod+Escape | Quit (asks for confirmation) |
-| mod+F1 | Cycle window focus |
-| mod+H/J/K/L or arrows | Focus adjacent window |
-| mod+Shift+H/J/K/L or arrows | Move focused window |
-| mod+comma / mod+period | Consume left / consume right |
-| mod+R / mod+F | Cycle width / toggle fullscreen |
-| mod+T | Toggle floating for the focused window |
-| mod+P | Toggle pin for the focused window |
-| mod+O | Toggle the overview |
-| mod+1..9 | Switch workspace on focused monitor |
-| mod+Shift+1..9 | Move focused window to workspace and follow |
-
-`kitty` is an optional startup command. Replace it with another command, or omit it by running `just run debug`
-or `./build-debug/umbriel`. There is no default spawn keybind, so add one under `[keybinds]` (see
-[`examples/config.toml`](examples/config.toml)) to open more terminals from inside the session, e.g. `"Mod+Return" = "spawn:kitty"`.
-
-Stop with mod+Escape or `Ctrl+C` from the parent terminal.
-
-## Configuration
-
-Umbriel first checks `$XDG_CONFIG_HOME/umbriel/config.toml`, then
-`$XDG_CONFIG_DIRS`, and finally its packaged `share/umbriel/config.toml`.
-These paths remain watched, so creating a higher-priority config switches to it
-without a session restart. Pass `-c path/to/config.toml` to pin another file.
-Config files can include files with
-`[include] files = ["theme.toml", "keybinds.toml"]`; later files and the main
-file override earlier values.
-
-See [`examples/config.toml`](examples/config.toml) for the packaged starting configuration and
-[`our online documentation`](https://docs.noctalia.dev/umbriel/) for the full reference.
-
-### Nix (home-manager / NixOS)
-
-Declarative configuration uses Nix attrsets serialized to TOML with `pkgs.formats.toml`.
-
-```nix
-# flake inputs
-umbriel.url = "git+https://github.com/noctalia-dev/umbriel";
-
-# NixOS
-imports = [ inputs.umbriel.nixosModules.default ];
-programs.umbriel.enable = true;
-
-# home-manager
-imports = [ inputs.umbriel.homeModules.default ];
-programs.umbriel = {
-  enable = true;
-  settings = {
-    general.autostart = [ "noctalia" ];
-    layout.gap = 5;
-    input.keyboard.layout = "de";
-    keybinds = {
-      "Mod+Return" = "spawn:kitty";
-      "Mod+Q" = "window-close";
-      "Mod" = "spawn:noctalia msg panel-toggle launcher";
-    };
-  };
-};
-```
-
-The portal lives in [a separate repository](https://github.com/noctalia-dev/xdg-desktop-portal-umbriel) and comes
-with the NixOS module: enabling Umbriel installs it, configures it as the `xdg.portal` backend, and writes the
-portal configuration screencasting needs. You can set `programs.umbriel.portalPackage` to null if you don't want
-the portal.
-
-When `settings` is omitted, the Home Manager and hjem modules leave the user path untouched so Umbriel loads its
-packaged configuration. Home Manager also accepts a raw TOML string or a path. The hjem module is exported as
-`inputs.umbriel.hjemModules.default`.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, naming conventions, the dependency stack, and debugging
-helpers, and [SCOPE.md](SCOPE.md) for what the project takes on and what it declines. Umbriel shares its conventions
-with [noctalia](https://github.com/noctalia-dev/noctalia). For general help and design discussion, join the community
-on [Discord](https://discord.noctalia.dev).
-
-Bug reports are always welcome. Feature requests are read against [SCOPE.md](SCOPE.md), so please skim it before
-opening one, and ask on Discord if you are unsure whether an idea fits.
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
-
-## Star History
-
-<p align="center">
-  <a href="https://github.com/noctalia-dev/noctalia/stargazers">
-    <img src="https://api.noctalia.dev/stars/umbriel" alt="Star History" />
-  </a>
-</p>
+The GPU harness needs an available DRM render node. A successful build or pure-logic unit test is not, by itself,
+validation on a real GPU or native seat. The core Sink/Pull MVP is implemented; Self Blur and expanded visible depth
+remain under personal evaluation and performance tuning. See [LICENSE](LICENSE) for the upstream license; changes in
+this fork must also follow the repository license.

@@ -192,6 +192,11 @@ UMBRIEL_TEST(parsesSimpleActions) {
   CHECK(bind.action == KeybindAction::WindowFocusSwitchFloating);
   CHECK(!parseAction("window-focus-toggle-floating-tiling", bind));
 
+  CHECK(parseAction("window-sink", bind));
+  CHECK(bind.action == KeybindAction::WindowSink);
+  CHECK(parseAction("window-pull", bind));
+  CHECK(bind.action == KeybindAction::WindowPull);
+
   CHECK(parseAction("session-quit", bind));
   CHECK(bind.action == KeybindAction::SessionQuit);
 }

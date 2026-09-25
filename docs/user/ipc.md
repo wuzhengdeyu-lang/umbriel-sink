@@ -26,13 +26,30 @@ Replies use `{"ok": ...}` or `{"err": "..."}`.
 | `{"cmd":"msg","arg":"<action>"}` | `umbriel msg <action>` |
 
 Window entries include IDs, application identity, process ID, geometry,
-workspace, and scratchpad membership. XWayland windows report an unknown client
-PID because they share the xwayland-satellite connection.
+workspace, scratchpad membership, and Sink state. `floating` and
+`base_placement` continue to describe the window's underlying placement while
+`sunk` is true; `sink_depth` is `0` for the stack top and `null` for a normal
+window. XWayland windows report an unknown client PID because they share the
+xwayland-satellite connection.
 
 Workspace entries include a stable ID, display name, index, output, layout,
-occupancy, and active and focused states. Use the `named` boolean instead of
+occupancy, `sink_count`, and active and focused states. A workspace containing
+only sunk windows remains occupied. Use the `named` boolean instead of
 guessing from the display name; an explicitly named workspace may still be
 called `"2"`.
+
+Sink depth is logical rather than a visibility guarantee: by default depths zero
+and one are projected, while depth two and below stay in the stack behind the
+visual horizon. `[appearance.sink].visible_depth` can move that horizon from
+one to four layers. During Pull, `sunk` becomes false as soon as layout membership is
+restored; the compositor may briefly keep the passive projection as the sole
+presentation owner while it waits for the compatible client commit.
+
+Workspace and output transfers preserve Sink membership. A destination keeps
+its existing stack at the bottom, then appends each source stack from oldest to
+newest; when several workspaces are evacuated together they are processed in
+stable workspace order. Consequently each source's top entry remains above its
+older entries, including after an output disappears and later returns.
 
 ## Event stream
 
@@ -118,6 +135,12 @@ umbriel subscribe workspaces |
 
 ## Inspection commands
 
-`umbriel outputs`, `umbriel color`, `umbriel tearing`, `umbriel layers`, and
-`umbriel keyboard-layouts` print human-readable state. Each accepts `--json`.
+`umbriel outputs`, `umbriel color`, `umbriel tearing`, `umbriel layers`,
+`umbriel keyboard-layouts`, and `umbriel render-stats` print human-readable
+state. Each accepts `--json`. Render timing is disabled by default; start the
+compositor with `UMBRIEL_RENDER_TIMING=1` to collect frame duration samples for
+`render-stats`. The command reports both CPU render-and-commit duration and GPU
+timer results. When the driver marks GPU queries disjoint, `gpu_samples`
+remains zero and the CPU values are the available fallback rather than a GPU
+measurement.
 `umbriel validate` checks a configuration without a running compositor.

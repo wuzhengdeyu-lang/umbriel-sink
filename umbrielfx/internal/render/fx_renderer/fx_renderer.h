@@ -1,19 +1,19 @@
 #ifndef _FX_OPENGL_H
 #define _FX_OPENGL_H
 
+#include "render/fx_renderer/shaders.h"
+#include "render/tracy.h"
+
 #include <GLES2/gl2.h>
-#include <umbrielfx/render/fx_renderer/fx_renderer.h>
 #include <stdbool.h>
 #include <time.h>
+#include <umbrielfx/render/fx_renderer/fx_renderer.h>
 #include <wlr/render/egl.h>
 #include <wlr/render/interface.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/render/wlr_texture.h>
 #include <wlr/util/addon.h>
 #include <wlr/util/box.h>
-
-#include "render/fx_renderer/shaders.h"
-#include "render/tracy.h"
 
 struct fx_framebuffer;
 struct wlr_allocator;
@@ -239,6 +239,10 @@ struct fx_renderer {
 	bool animation_shadow_attempted;
 	struct fx_animation_shader *animation_shadow_horizontal;
 	struct fx_animation_shader *animation_shadow_vertical;
+  bool self_blur_attempted;
+  struct fx_animation_shader* self_blur_horizontal;
+  struct fx_animation_shader* self_blur_vertical;
+  struct fx_animation_shader* self_blur_single;
 
 	struct wl_list buffers; // fx_framebuffer.link
 	struct wl_list textures; // fx_texture.link

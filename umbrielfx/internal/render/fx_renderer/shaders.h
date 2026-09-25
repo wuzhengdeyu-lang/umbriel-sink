@@ -1,11 +1,12 @@
 #ifndef _FX_SHADERS_H
 #define _FX_SHADERS_H
 
+#include "types/fx/clipped_region.h"
+
 #include <GLES2/gl2.h>
 #include <stdbool.h>
-#include <wayland-server-core.h>
 #include <umbrielfx/types/fx/clipped_region.h>
-#include "types/fx/clipped_region.h"
+#include <wayland-server-core.h>
 
 struct fx_renderer;
 
@@ -16,7 +17,7 @@ struct fx_animation_shader {
 	GLuint program;
 	GLint proj, tex_proj, position, tex, sample_matrix;
 	GLint previous_tex, previous_sample_matrix;
-	GLint progress, linear_progress, direction, size, random_seed;
+	GLint progress, linear_progress, direction, depth, size, random_seed;
 };
 
 GLuint compile_shader(GLuint type, const GLchar *src);

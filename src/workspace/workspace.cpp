@@ -12,13 +12,17 @@
 #include "output/output.h"
 #include "overview/overview.h"
 #include "scene/animation_shader.h"
+#include "scene/window_projection.h"
 #include "server/server.h"
 #include "view/floating.h"
 #include "view/registry.h"
 #include "view/view.h"
 #include "view/xdg_size.h"
+#include "workspace/scratchpad.h"
+#include "workspace/sink_presentation.h"
 // clang-format off
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <format>
@@ -38,6 +42,8 @@ namespace umbriel {
         | EXT_WORKSPACE_HANDLE_V1_WORKSPACE_CAPABILITIES_DEACTIVATE;
 
     constexpr uint32_t kGroupCaps = EXT_WORKSPACE_GROUP_HANDLE_V1_GROUP_CAPABILITIES_CREATE_WORKSPACE;
+
+    constexpr int kSinkPullCommitDeadlineMs = 1200;
 
     // The bridge between the layout's opaque View identity and the client state it needs to size that view. Workspace
     // owns both sides, so it owns the lookup; layout/ stays free of view/ and its geometry stays testable.
@@ -113,7 +119,9 @@ namespace umbriel {
     const uint32_t coords[1] = {static_cast<uint32_t>(m_index)};
     wlr_ext_workspace_handle_v1_set_coordinates(m_handle, coords, 1);
     m_tree = wlr_scene_tree_create(m_group->output()->viewRoot());
-    // Focus raises only within a layer: floating views can never fall below tiles.
+    // Children are back-to-front. Sunk views stay behind every ordinary
+    // workspace window; focus raises only within the ordinary layers.
+    m_sinkLayer = wlr_scene_tree_create(m_tree);
     m_shadowLayer = wlr_scene_tree_create(m_tree);
     m_tiledLayer = wlr_scene_tree_create(m_tree);
     m_floatingLayer = wlr_scene_tree_create(m_tree);
@@ -123,7 +131,18 @@ namespace umbriel {
   Workspace::~Workspace() {
     discardCloseSnapshots();
     endLayoutMotion();
+    for (const auto& presentation : m_sinkPresentations) {
+      if (presentation->deadline != nullptr) {
+        wl_event_source_remove(presentation->deadline);
+        presentation->deadline = nullptr;
+      }
+      if (presentation->view != nullptr) {
+        presentation->view->m_projectionOwnsPresentation = false;
+      }
+    }
+    m_sinkPresentations.clear();
     for (View* view : m_views) {
+      view->m_sunk = false;
       view->cancelPositionAnimation();
       const bool fs = view->toplevel()->current.fullscreen || view->toplevel()->scheduled.fullscreen;
       wlr_scene_node_reparent(
@@ -135,6 +154,7 @@ namespace umbriel {
     if (m_tree != nullptr) {
       wlr_scene_node_destroy(&m_tree->node);
       m_tree = nullptr;
+      m_sinkLayer = nullptr;
       m_shadowLayer = nullptr;
       m_tiledLayer = nullptr;
       m_floatingLayer = nullptr;
@@ -179,6 +199,7 @@ namespace umbriel {
     m_active = active;
     wlr_ext_workspace_handle_v1_set_active(m_handle, active);
     applyVisibility();
+    refreshSinkPresentation(false);
     syncCloseSnapshots();
     if (active) {
       markArrange(false);
@@ -194,9 +215,9 @@ namespace umbriel {
   }
 
   void Workspace::setFocusedView(View* view) {
-    if (view == nullptr || view->workspace() == this) {
+    if (view == nullptr || (view->workspace() == this && !view->sunk())) {
       m_focusedView = view;
-      if (view != nullptr && view->floating()) {
+      if (view != nullptr && view->activeFloating()) {
         std::erase(m_floatingStack, view);
         m_floatingStack.push_back(view);
         restackFloatingViews();
@@ -208,7 +229,7 @@ namespace umbriel {
     if (view == nullptr || view->workspace() != this) {
       return;
     }
-    if (view->floating()) {
+    if (view->activeFloating()) {
       if (std::ranges::find(m_floatingStack, view) == m_floatingStack.end()) {
         m_floatingStack.push_back(view);
       }
@@ -220,7 +241,7 @@ namespace umbriel {
 
   void Workspace::restackFloatingViews() {
     for (View* view : m_floatingStack) {
-      if (view != nullptr && view->workspace() == this && view->floating()) {
+      if (view != nullptr && view->workspace() == this && view->activeFloating()) {
         view->raiseToTop();
       }
     }
@@ -241,9 +262,24 @@ namespace umbriel {
     if (view->pinned()) {
       // Cross-output moves have to rehome the pinned view onto the new output's clipped roots.
       view->restorePinnedSceneParent();
+    } else if (view->sunk()) {
+      wlr_scene_node_reparent(&view->sceneTree()->node, m_sinkLayer);
+      view->reparentShadow(m_shadowLayer);
     } else {
       wlr_scene_node_reparent(&view->sceneTree()->node, fs ? m_fullscreenTree : viewLayer(view->tiled()));
       view->reparentShadow(m_shadowLayer);
+    }
+    if (view->sunk()) {
+      [[maybe_unused]] const bool inserted = m_sinkStack.push(view);
+      assert(inserted);
+      SinkPresentation& presentation = ensureSinkPresentation(view, view->presentedBox());
+      view->m_projectionOwnsPresentation = true;
+      view->setNodeEnabled(false);
+      presentation.projection->setEnabled(m_active);
+      refreshSinkPresentation(false);
+      applyVisibility();
+      m_group->reconcileDynamic();
+      return;
     }
     syncFloatingStack(view);
     applyVisibility();
@@ -253,9 +289,21 @@ namespace umbriel {
     m_group->reconcileDynamic();
   }
 
-  View* Workspace::removeView(View* view, bool reconcile) {
+  View* Workspace::removeView(View* view, bool reconcile, bool preserveSink) {
     if (view == nullptr) {
       return nullptr;
+    }
+    if (preserveSink && view->sunk()) {
+      [[maybe_unused]] const bool removed = m_sinkStack.remove(view);
+      assert(removed);
+      discardSinkPresentation(view);
+      // The destination will create a new projection under its own clipped
+      // Sink layer. Keep the live tree inert while it is between workspaces.
+      view->m_projectionOwnsPresentation = true;
+      view->setNodeEnabled(false);
+      refreshSinkPresentation(false);
+    } else {
+      removeFromSinkStack(view);
     }
     if (!view->pinned()) {
       const bool fs = view->toplevel()->current.fullscreen || view->toplevel()->scheduled.fullscreen;
@@ -292,6 +340,409 @@ namespace umbriel {
     return replacement;
   }
 
+  bool Workspace::sink(View* view) {
+    if (view == nullptr
+        || !view->mapped()
+        || view->workspace() != this
+        || view->sunk()
+        || view->pinned()
+        || m_group == nullptr
+        || m_group->server() == nullptr
+        || m_group->server()->sessionLocked()) {
+      return false;
+    }
+    Server* server = m_group->server();
+    if (server->overview() != nullptr && server->overview()->active()) {
+      return false;
+    }
+    if (ScratchpadManager* scratchpad = server->scratchpadManager();
+        scratchpad != nullptr && scratchpad->contains(view)) {
+      return false;
+    }
+    if (Cursor* cursor = server->cursor(); cursor != nullptr && cursor->grabbedView() == view) {
+      return false;
+    }
+    if (view->transientParent() != nullptr) {
+      return false;
+    }
+    for (View* other : m_views) {
+      if (other != view && other != nullptr && other->mapped() && other->transientParent() == view) {
+        return false;
+      }
+    }
+
+    const bool layoutMember = m_layout->columnOf(view) >= 0;
+    const bool floatingMember = std::ranges::find(m_floatingStack, view) != m_floatingStack.end();
+    if ((view->tiled() && !layoutMember) || (view->floating() && !floatingMember)) {
+      return false;
+    }
+    assert(!(layoutMember && floatingMember));
+
+    const wlr_box sourceBox = view->presentedBox();
+    SinkPresentation& presentation = ensureSinkPresentation(view, sourceBox);
+    if (presentation.deadline != nullptr) {
+      wl_event_source_remove(presentation.deadline);
+      presentation.deadline = nullptr;
+    }
+    ++presentation.generation;
+    presentation.pulling = false;
+    presentation.focusOnComplete = false;
+    presentation.animationDone = false;
+    presentation.barrierTimedOut = false;
+    view->m_projectionOwnsPresentation = true;
+    view->setNodeEnabled(false);
+
+    View* replacement = m_focusedView == view ? focusReplacementForRemoval(view) : nullptr;
+    if (layoutMember) {
+      layoutDetach(view, true);
+    } else {
+      std::erase(m_floatingStack, view);
+    }
+    view->m_sunk = true;
+    [[maybe_unused]] const bool inserted = m_sinkStack.push(view);
+    assert(inserted);
+    assert(m_sinkStack.contains(view));
+    assert(m_layout->columnOf(view) < 0);
+    assert(std::ranges::find(m_floatingStack, view) == m_floatingStack.end());
+
+    view->setBorderFocused(false);
+    view->setForeignActivated(false);
+    refreshSinkPresentation(true);
+
+    if (m_focusedView == view) {
+      m_focusedView = nullptr;
+      if (replacement != nullptr) {
+        server->focusView(replacement, FocusReason::Directional);
+      } else {
+        server->clearKeyboardFocus();
+      }
+    }
+    server->scheduleIpcWindowsEvent();
+    server->scheduleIpcWorkspacesEvent();
+    server->refreshOutputPolicies();
+    server->updateIdleInhibit();
+    return true;
+  }
+
+  View* Workspace::pull(bool focus) {
+    View* view = m_sinkStack.pop();
+    if (view == nullptr) {
+      return nullptr;
+    }
+    assert(view->m_sunk);
+    assert(view->workspace() == this);
+    view->m_sunk = false;
+    assert(!m_sinkStack.contains(view));
+
+    wlr_scene_node_reparent(&view->sceneTree()->node, view->homeTree());
+    view->reparentShadow(m_shadowLayer);
+    if (view->tiled()) {
+      layoutAttach(view);
+      if (view->toplevel()->scheduled.maximized) {
+        view->setMaximized(true);
+      }
+      arrange(true);
+    } else {
+      syncFloatingStack(view);
+      view->restoreFloatingPosition();
+      syncViewPresentation(view);
+    }
+    beginPullPresentation(view, focus);
+    refreshSinkPresentation(true);
+    m_group->server()->scheduleIpcWindowsEvent();
+    m_group->server()->scheduleIpcWorkspacesEvent();
+    m_group->server()->refreshOutputPolicies();
+    m_group->server()->updateIdleInhibit();
+    return view;
+  }
+
+  bool Workspace::unwindTo(View* view) {
+    if (view == nullptr || !m_sinkStack.contains(view)) {
+      return false;
+    }
+    while (!m_sinkStack.empty()) {
+      View* pulled = pull(false);
+      if (pulled == view) {
+        if (SinkPresentation* presentation = sinkPresentationFor(view)) {
+          presentation->focusOnComplete = true;
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void Workspace::removeFromSinkStack(View* view) {
+    if (view == nullptr) {
+      return;
+    }
+    const bool removed = m_sinkStack.remove(view);
+    if (removed) {
+      view->m_sunk = false;
+    }
+    discardSinkPresentation(view);
+    if (m_focusedView == view) {
+      m_focusedView = nullptr;
+    }
+    if (m_group != nullptr && m_group->server() != nullptr) {
+      m_group->server()->scheduleIpcWindowsEvent();
+      m_group->server()->scheduleIpcWorkspacesEvent();
+    }
+    if (removed) {
+      refreshSinkPresentation(true);
+    }
+  }
+
+  Workspace::SinkPresentation* Workspace::sinkPresentationFor(const View* view) const {
+    const auto found = std::ranges::find_if(m_sinkPresentations, [view](const auto& presentation) {
+      return presentation->view == view;
+    });
+    return found != m_sinkPresentations.end() ? found->get() : nullptr;
+  }
+
+  Workspace::SinkPresentation& Workspace::ensureSinkPresentation(View* view, const wlr_box& sourceBox) {
+    if (SinkPresentation* existing = sinkPresentationFor(view)) {
+      return *existing;
+    }
+    auto presentation = std::make_unique<SinkPresentation>();
+    presentation->workspace = this;
+    presentation->view = view;
+    presentation->sourceBox = sourceBox.width > 0 && sourceBox.height > 0
+        ? sourceBox
+        : wlr_box{
+              .x = view->sceneTree()->node.x,
+              .y = view->sceneTree()->node.y,
+              .width = std::max(1, view->committedContentBox().width),
+              .height = std::max(1, view->committedContentBox().height),
+          };
+    presentation->projection = std::make_unique<WindowProjection>(*m_group->server(), *view, m_sinkLayer);
+    presentation->projection->setBox(presentation->sourceBox);
+    presentation->projection->setOpacity(1.0F);
+    presentation->projection->setBorderColor(config().colors.border.unfocused);
+    presentation->projection->setEnabled(m_active);
+    SinkPresentation* result = presentation.get();
+    m_sinkPresentations.push_back(std::move(presentation));
+    return *result;
+  }
+
+  wlr_box Workspace::sinkTargetBox(const SinkPresentation& presentation, size_t depth) const {
+    wlr_box usable = usableArea();
+    if (usable.width <= 0 || usable.height <= 0) {
+      usable = presentation.sourceBox;
+    }
+    return sinkProjectionBox(
+        presentation.sourceBox.width, presentation.sourceBox.height, usable, config().appearance.sink, depth
+    );
+  }
+
+  void Workspace::refreshSinkPresentation(bool animate) {
+    const auto& animation = config().animation;
+    const auto& move = animation.windowsMove;
+    const auto& sink = config().appearance.sink;
+    const bool shouldAnimate = animate && animation.enabled && move.enabled && move.durationMs > 0;
+    const bool workspaceVisible = m_active || m_inSwitchTransition;
+    std::vector<std::pair<View*, uint64_t>> completedPulls;
+    for (const auto& presentation : m_sinkPresentations) {
+      if (!presentation->pulling) {
+        continue;
+      }
+      presentation->projection->setEnabled(workspaceVisible);
+      if (!shouldAnimate) {
+        presentation->projection->setBox(presentation->view->targetBox());
+        presentation->projection->setOpacity(1.0F);
+        presentation->animationDone = true;
+        if (presentation->view->projectionCommitReady() || presentation->barrierTimedOut) {
+          completedPulls.emplace_back(presentation->view, presentation->generation);
+        }
+      }
+    }
+    for (View* view : m_sinkStack.entries()) {
+      if (view == nullptr) {
+        continue;
+      }
+      SinkPresentation& presentation = ensureSinkPresentation(view, view->presentedBox());
+      const size_t depth = m_sinkStack.depth(view).value_or(static_cast<size_t>(sink.visibleDepth));
+      const wlr_box target = sinkTargetBox(presentation, depth);
+      const SinkDepthStyle style = sinkDepthStyle(sink, depth);
+      const float opacity = style.opacity;
+      presentation.projection->setDepth(style.effectDepth);
+      presentation.projection->setSelfBlurEnabled(true);
+      if (shouldAnimate && workspaceVisible) {
+        presentation.projection->setEnabled(true);
+        presentation.projection->animateTo(target, opacity, move.durationMs, move.curve);
+      } else {
+        presentation.projection->setBox(target);
+        presentation.projection->setOpacity(opacity);
+        presentation.projection->setEnabled(workspaceVisible && style.visible);
+      }
+      view->m_projectionOwnsPresentation = true;
+      view->setNodeEnabled(false);
+    }
+    for (const auto& [view, generation] : completedPulls) {
+      finishPullPresentation(view, generation);
+    }
+  }
+
+  void Workspace::beginPullPresentation(View* view, bool focus) {
+    SinkPresentation* presentation = sinkPresentationFor(view);
+    if (presentation == nullptr) {
+      view->m_projectionOwnsPresentation = false;
+      syncViewPresentation(view);
+      if (focus) {
+        m_group->server()->focusView(view, FocusReason::SinkPull);
+      }
+      return;
+    }
+    ++presentation->generation;
+    presentation->pulling = true;
+    presentation->focusOnComplete = presentation->focusOnComplete || focus;
+    presentation->animationDone = false;
+    presentation->barrierTimedOut = false;
+    view->m_projectionOwnsPresentation = true;
+    view->setNodeEnabled(false);
+
+    const wlr_box target = view->targetBox();
+    const auto& animation = config().animation;
+    const auto& move = animation.windowsMove;
+    const bool shouldAnimate = animation.enabled && move.enabled && move.durationMs > 0;
+    presentation->projection->setEnabled(m_active);
+    presentation->projection->setSelfBlurEnabled(false);
+    if (shouldAnimate) {
+      presentation->projection->animateTo(target, 1.0F, move.durationMs, move.curve);
+    } else {
+      presentation->projection->setBox(target);
+      presentation->projection->setOpacity(1.0F);
+      presentation->animationDone = true;
+    }
+
+    if (presentation->deadline != nullptr) {
+      wl_event_source_remove(presentation->deadline);
+      presentation->deadline = nullptr;
+    }
+    if (!view->projectionCommitReady()) {
+      wl_event_loop* loop = wl_display_get_event_loop(m_group->server()->display());
+      presentation->deadline = wl_event_loop_add_timer(loop, onSinkPullDeadline, presentation);
+      if (presentation->deadline != nullptr) {
+        wl_event_source_timer_update(presentation->deadline, kSinkPullCommitDeadlineMs);
+      } else {
+        presentation->barrierTimedOut = true;
+      }
+    }
+    maybeFinishPullPresentation(*presentation);
+  }
+
+  int Workspace::onSinkPullDeadline(void* data) {
+    auto* presentation = static_cast<SinkPresentation*>(data);
+    if (presentation == nullptr || presentation->workspace == nullptr || !presentation->pulling) {
+      return 0;
+    }
+    presentation->barrierTimedOut = true;
+    presentation->workspace->maybeFinishPullPresentation(*presentation);
+    return 0;
+  }
+
+  void Workspace::onViewCommitted(View* view) {
+    if (SinkPresentation* presentation = sinkPresentationFor(view); presentation != nullptr) {
+      if (presentation->pulling) {
+        maybeFinishPullPresentation(*presentation);
+        return;
+      }
+      const wlr_box& geometry = view->toplevel()->base->geometry;
+      if (geometry.width > 0
+          && geometry.height > 0
+          && (presentation->sourceBox.width != geometry.width || presentation->sourceBox.height != geometry.height)) {
+        presentation->sourceBox.width = geometry.width;
+        presentation->sourceBox.height = geometry.height;
+        refreshSinkPresentation(true);
+      }
+    }
+  }
+
+  void Workspace::deferProjectionFocus(View* view) {
+    if (SinkPresentation* presentation = sinkPresentationFor(view); presentation != nullptr && presentation->pulling) {
+      presentation->focusOnComplete = true;
+    }
+  }
+
+  void Workspace::maybeFinishPullPresentation(SinkPresentation& presentation) {
+    if (!presentation.pulling || !presentation.animationDone || presentation.view == nullptr) {
+      return;
+    }
+    if (!presentation.view->projectionCommitReady() && !presentation.barrierTimedOut) {
+      return;
+    }
+    finishPullPresentation(presentation.view, presentation.generation);
+  }
+
+  void Workspace::finishPullPresentation(View* view, uint64_t generation) {
+    SinkPresentation* presentation = sinkPresentationFor(view);
+    if (presentation == nullptr || !presentation->pulling || presentation->generation != generation) {
+      return;
+    }
+    const bool focus = presentation->focusOnComplete;
+    if (presentation->deadline != nullptr) {
+      wl_event_source_remove(presentation->deadline);
+      presentation->deadline = nullptr;
+    }
+    view->m_projectionOwnsPresentation = false;
+    std::erase_if(m_sinkPresentations, [presentation](const auto& candidate) {
+      return candidate.get() == presentation;
+    });
+    if (view->mapped() && view->workspace() == this) {
+      syncViewPresentation(view);
+      if (focus) {
+        m_group->server()->focusView(view, FocusReason::SinkPull);
+      }
+    }
+  }
+
+  void Workspace::discardSinkPresentation(View* view) {
+    SinkPresentation* presentation = sinkPresentationFor(view);
+    if (presentation == nullptr) {
+      return;
+    }
+    if (presentation->deadline != nullptr) {
+      wl_event_source_remove(presentation->deadline);
+      presentation->deadline = nullptr;
+    }
+    if (view != nullptr) {
+      view->m_projectionOwnsPresentation = false;
+    }
+    std::erase_if(m_sinkPresentations, [presentation](const auto& candidate) {
+      return candidate.get() == presentation;
+    });
+  }
+
+  bool Workspace::tickSinkAnimations(uint64_t nowMsec) {
+    std::vector<std::pair<View*, uint64_t>> completed;
+    bool active = false;
+    for (const auto& presentation : m_sinkPresentations) {
+      active = presentation->projection->tick(nowMsec) || active;
+      if (presentation->pulling && !presentation->projection->animating()) {
+        presentation->animationDone = true;
+        if (presentation->view->projectionCommitReady() || presentation->barrierTimedOut) {
+          completed.emplace_back(presentation->view, presentation->generation);
+        }
+      } else if (!presentation->pulling && !presentation->projection->animating()) {
+        const size_t depth =
+            m_sinkStack.depth(presentation->view).value_or(static_cast<size_t>(config().appearance.sink.visibleDepth));
+        if (depth >= static_cast<size_t>(config().appearance.sink.visibleDepth)) {
+          presentation->projection->setEnabled(false);
+        }
+      }
+    }
+    for (const auto& [view, generation] : completed) {
+      finishPullPresentation(view, generation);
+    }
+    return active;
+  }
+
+  bool Workspace::sinkAnimationsActive() const {
+    return std::ranges::any_of(m_sinkPresentations, [](const auto& presentation) {
+      return presentation->projection->animating();
+    });
+  }
+
   int Workspace::layoutAttachIndex(const View* view) const {
     int focusedColumn = m_layout->columnOf(m_focusedView);
     if (focusedColumn < 0 && m_group != nullptr) {
@@ -322,7 +773,7 @@ namespace umbriel {
   void Workspace::layoutAttach(
       View* view, std::optional<double> initialExtent, std::optional<int> initialExtentPx, LayoutAttachOrigin origin
   ) {
-    if (view == nullptr || !view->mapped() || !view->tiled() || m_layout->columnOf(view) >= 0) {
+    if (view == nullptr || !view->mapped() || view->sunk() || !view->tiled() || m_layout->columnOf(view) >= 0) {
       return;
     }
     const bool exitFullscreen = origin == LayoutAttachOrigin::OpeningView
@@ -431,6 +882,7 @@ namespace umbriel {
     ScrollingLayout* scrolling = scrollingLayout();
     if (view == nullptr
         || !view->mapped()
+        || view->sunk()
         || !view->tiled()
         || scrolling == nullptr
         || !view->namedScrollingColumnName()) {
@@ -774,7 +1226,7 @@ namespace umbriel {
     // Fullscreen and floating views position themselves. Established tiled members share windows_move below, while an
     // opening tiled lifecycle view is presented directly at its final slot.
     for (View* view : m_views) {
-      if (view == nullptr || !view->mapped()) {
+      if (view == nullptr || !view->mapped() || view->sunk()) {
         continue;
       }
       if (view->layoutFullscreen()) {
@@ -1255,7 +1707,7 @@ namespace umbriel {
     const int rowIndex = m_layout->rowOf(view);
     const auto& columns = m_layout->columns();
     const auto mappedCandidate = [view](View* candidate) {
-      return candidate != nullptr && candidate != view && candidate->mapped();
+      return candidate != nullptr && candidate != view && candidate->mapped() && !candidate->sunk();
     };
 
     const wlr_xdg_toplevel* toplevel = view->toplevel();
@@ -1270,7 +1722,7 @@ namespace umbriel {
     // workspace, since nothing else refocuses until a destroy-time fallback that unmap-only clients never reach.
     if (columnIndex < 0 || columnIndex >= static_cast<int>(columns.size())) {
       for (const auto& entry : m_group->server()->registry().all()) {
-        if (entry.get() != view && entry->mapped() && entry->workspace() == this) {
+        if (entry.get() != view && entry->mapped() && !entry->sunk() && entry->workspace() == this) {
           return entry.get();
         }
       }
@@ -1795,6 +2247,7 @@ namespace umbriel {
 
   void Workspace::beginSwitchTransition() {
     m_inSwitchTransition = true;
+    refreshSinkPresentation(false);
     wlr_box clip{};
     if (m_group != nullptr && m_group->output() != nullptr) {
       wlr_output_layout_get_box(m_group->server()->outputLayout(), m_group->output()->wlr(), &clip);
@@ -1820,6 +2273,7 @@ namespace umbriel {
         view->setNodeEnabled(true);
       }
     }
+    refreshSinkPresentation(false);
   }
 
   void Workspace::setSlideOffset(double x, double y) {
@@ -1850,6 +2304,7 @@ namespace umbriel {
       wlr_scene_tree_set_clip(m_fullscreenTree, nullptr);
     }
     m_inSwitchTransition = false;
+    refreshSinkPresentation(false);
     for (View* view : m_switchViews) {
       view->setFadeAlpha(1.0F);
       if (!m_active) {
@@ -2310,6 +2765,12 @@ namespace umbriel {
     }
   }
 
+  void WorkspaceGroup::refreshSinkPresentations(bool animate) {
+    for (const auto& workspace : m_workspaces) {
+      workspace->refreshSinkPresentation(animate);
+    }
+  }
+
   void WorkspaceGroup::flushArrange() {
     // Indexed, and the bound re-read every step: arrange() reaches the overview and the view animations, and a
     // workspace list that grows or shrinks under an iterator would be a use-after-free rather than a missed arrange.
@@ -2575,13 +3036,15 @@ namespace umbriel {
     // After reconcileDynamic, which may have dropped an emptied workspace.
     for (const auto& workspace : m_workspaces) {
       active = workspace->tickLayoutMotion(nowMsec) || active;
+      active = workspace->tickSinkAnimations(nowMsec) || active;
     }
     return active;
   }
 
   bool WorkspaceGroup::hasActiveAnimations() const {
-    return m_slideAnim.animating()
-        || std::ranges::any_of(m_workspaces, [](const auto& workspace) { return workspace->layoutMotionActive(); });
+    return m_slideAnim.animating() || std::ranges::any_of(m_workspaces, [](const auto& workspace) {
+             return workspace->layoutMotionActive() || workspace->sinkAnimationsActive();
+           });
   }
 
   void WorkspaceGroup::activate(Workspace* workspace, bool animate) {

@@ -11,13 +11,14 @@ readonly OVERVIEW_X=320
 readonly OVERVIEW_Y=180
 readonly OVERVIEW_RIGHT=959
 readonly POINTER="${UMBRIEL_POINTER_CLIENT:-./build-debug/tests/pointer-client}"
+readonly FOOT_COLORS_SECTION="${UMBRIEL_FOOT_COLORS_SECTION:-colors}"
 
 pointer() {
   "$POINTER" "$OUTPUT_W" "$OUTPUT_H" "$@"
 }
 
 spawn_client() {
-  foot --config=/dev/null --override=colors.background=000000 \
+  foot --config=/dev/null --override="$FOOT_COLORS_SECTION.background=000000" \
     --title="right-edge-$1" sh -c 'sleep 120' > /dev/null 2>&1 &
 }
 

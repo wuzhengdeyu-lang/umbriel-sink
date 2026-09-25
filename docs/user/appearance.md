@@ -124,6 +124,49 @@ Optimized blur samples the background beneath the window stack. Set it to
 `false` when translucent surfaces should blur the surfaces directly behind
 them, at a higher rendering cost.
 
+### Sink projection and self blur
+
+```toml
+[appearance.sink]
+visible_depth = 2
+# Optional: replace the per-depth styles (one table per visible layer).
+# levels = [
+#   { scale = 0.93, opacity = 0.82, blur_strength = 0.5 },
+#   { scale = 0.85, opacity = 0.45, blur_strength = 1.0 },
+# ]
+self_blur = false
+blur_radius = 6
+blur_samples = 9
+```
+
+Sink self blur samples each visible Sink projection itself; it does not sample
+the desktop behind the window. It remains disabled by default while the P4
+performance and experience acceptance is still open. When disabled, unsupported,
+or rejected by the renderer, Sink keeps its scale, opacity, LIFO, focus, and restore
+semantics unchanged.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `visible_depth` | `2` | Number of visible sunk windows, from 1 to 4; deeper windows remain in the logical stack but are hidden. |
+| `levels` | Built-in styles | Optional array of 1–4 complete tables, with at least `visible_depth` entries. Depth 0 is nearest the desktop/front. Each table requires `scale` (0.1–1.0), `opacity` (0.0–1.0), and `blur_strength` (0.0–1.0). |
+| `self_blur` | `false` | Enable the experimental persistent Self Blur. |
+| `blur_radius` | `6` | Maximum kernel radius from 1 to 32 logical pixels. |
+| `blur_samples` | `9` | Requested samples from 3 to 17; even values degrade to the next lower odd count. |
+
+The normal path uses two separable passes. Reducing `blur_samples` is the first
+quality fallback; setting `self_blur = false` removes the static effect without
+disabling Sink animations.
+
+The built-in level styles are `(scale, opacity, blur_strength)` =
+`(0.93, 0.82, 0.5)`, `(0.85, 0.45, 1.0)`, `(0.77, 0.25, 1.0)`, and
+`(0.69, 0.14, 1.0)`. Only the first two are visible by default. `blur_strength`
+sets the fraction of `blur_radius` used at that depth when `self_blur` is enabled;
+it does not turn blur on by itself. Changing these keys and reloading the config
+updates existing Sink projections without changing their stack order.
+Showing three or four layers can increase rendering cost, especially with
+`self_blur = true`; the current GPU budget measurements cover the default
+two-layer horizon only.
+
 ### Shadow
 
 ```toml

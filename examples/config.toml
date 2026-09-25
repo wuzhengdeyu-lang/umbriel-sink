@@ -47,6 +47,18 @@ files = []
 [appearance.blur]
 radius = 3
 
+# Experimental Sink Self Blur stays opt-in until native-session P4 acceptance.
+[appearance.sink]
+visible_depth = 2
+# Optional per-depth styles; uncomment the whole array to customize.
+# levels = [
+#   { scale = 0.93, opacity = 0.82, blur_strength = 0.5 },
+#   { scale = 0.85, opacity = 0.45, blur_strength = 1.0 },
+# ]
+self_blur = false
+blur_radius = 6
+blur_samples = 9
+
 # ==============================================================================
 # Input
 # Enable NumLock when a physical keyboard connects.
@@ -91,6 +103,8 @@ numlock_toggle = true
 "Mod+M" = "window-toggle-maximize-to-edges"
 "Mod+F" = "window-toggle-fullscreen"
 "Mod+Ctrl+F" = "window-toggle-maximize"
+"Mod+Ctrl+Down" = "window-sink"
+"Mod+Ctrl+Up" = "window-pull"
 "Mod+R" = "window-cycle-primary-extent"
 "Mod+Shift+R" = "window-cycle-primary-extent-back"
 "Mod+Comma" = "window-consume-left"

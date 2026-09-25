@@ -55,13 +55,15 @@ namespace umbriel {
         const std::string contentTypeSuffix = contentType == "none" ? "" : " [content_type=" + contentType + "]";
         const std::string scratchpad = entry.value("scratchpad", "");
         const std::string scratchpadSuffix = scratchpad.empty() ? "" : " [scratchpad=" + scratchpad + "]";
+        const std::string sunkSuffix =
+            entry.value("sunk", false) ? " [sunk depth=" + std::to_string(entry.value("sink_depth", 0U)) + "]" : "";
         std::println(
-            "{}{}{}\t{}\t[{} {}x{}{:+}{:+}]{}{}{}",
+            "{}{}{}\t{}\t[{} {}x{}{:+}{:+}]{}{}{}{}",
             entry.value("focused", false) ? "*" : (entry.value("urgent", false) ? "!" : " "),
             entry.value("xwayland", false) ? "[Xwayland] " : "", appId.empty() ? "-" : appId,
             title.empty() ? "-" : title, entry.value("floating", false) ? "float" : "tile", entry.value("w", 0),
             entry.value("h", 0), entry.value("x", 0), entry.value("y", 0), xdgTagSuffix, contentTypeSuffix,
-            scratchpadSuffix
+            scratchpadSuffix, sunkSuffix
         );
       }
     }
@@ -336,6 +338,19 @@ namespace umbriel {
       }
     }
 
+    void printRenderStats(const nlohmann::json& ok) {
+      for (const auto& output : ok) {
+        std::println(
+            "output {}: timing {}, callbacks {}, rendered {}, idle {}, CPU samples {}, average {} ms, min {} ms, max "
+            "{} ms; GPU samples {}",
+            output.value("name", ""), output.value("enabled", false) ? "enabled" : "disabled",
+            output.value("frame_callbacks", 0U), output.value("rendered_frames", 0U),
+            output.value("idle_callbacks", 0U), output.value("cpu_samples", 0U), output.value("cpu_average_ms", 0.0),
+            output.value("cpu_min_ms", 0.0), output.value("cpu_max_ms", 0.0), output.value("gpu_samples", 0U)
+        );
+      }
+    }
+
   } // namespace
 
   nlohmann::json IpcCommands::windows(Server& server, std::string_view /*arg*/) {
@@ -355,6 +370,14 @@ namespace umbriel {
       entry["xdg_tag"] = v->xdgTag().value_or("");
       entry["content_type"] = contentTypeName(v->contentType());
       entry["floating"] = v->floating();
+      entry["sunk"] = v->sunk();
+      entry["sink_depth"] = nullptr;
+      entry["base_placement"] = v->floating() ? "floating" : "tiled";
+      if (v->workspace() != nullptr) {
+        if (const std::optional<size_t> depth = v->workspace()->sinkDepth(v.get())) {
+          entry["sink_depth"] = *depth;
+        }
+      }
       // Workspace-local remembered focus. Seat-global activation is reported
       // separately by `active`; scratchpad windows have no workspace focus.
       entry["focused"] = v->workspace() != nullptr && v->workspace()->focusedView() == v.get();
@@ -405,6 +428,7 @@ namespace umbriel {
             {"active", workspace->active()},
             {"focused", output.get() == preferred && workspace->active()},
             {"occupied", workspace->hasViews()},
+            {"sink_count", workspace->sinkCount()},
             {"layout", layoutModeName(workspace->layoutMode())},
         });
       }
@@ -520,6 +544,7 @@ namespace umbriel {
           {"name", output->wlr()->name},
           {"allowed", output->configuredTearingAllowed()},
           {"requested", requested},
+          {"vrr_requested", output->vrrRequested()},
           {"last_commit_tearing", output->lastCommitTearing()},
           {"fallback_reason", requested ? output->tearingFallbackReason() : ""},
       };
@@ -575,6 +600,37 @@ namespace umbriel {
     };
   }
 
+  nlohmann::json IpcCommands::renderStats(Server& server, std::string_view /*arg*/) {
+    nlohmann::json outputs = nlohmann::json::array();
+    for (const auto& output : server.outputs()) {
+      const RenderTimingStats& stats = output->renderTimingStats();
+      const double cpuAverageMs = stats.cpuSamples > 0
+          ? static_cast<double>(stats.cpuTotalNs) / static_cast<double>(stats.cpuSamples) / 1'000'000.0
+          : 0.0;
+      const double gpuAverageMs = stats.gpuSamples > 0
+          ? static_cast<double>(stats.gpuTotalNs) / static_cast<double>(stats.gpuSamples) / 1'000'000.0
+          : 0.0;
+      outputs.push_back({
+          {"name", output->wlr()->name},
+          {"enabled", stats.enabled},
+          {"frame_callbacks", stats.frameCallbacks},
+          {"rendered_frames", stats.renderedFrames},
+          {"idle_callbacks", stats.idleCallbacks},
+          {"cpu_samples", stats.cpuSamples},
+          {"cpu_total_ns", stats.cpuTotalNs},
+          {"cpu_average_ms", cpuAverageMs},
+          {"cpu_min_ms", static_cast<double>(stats.cpuMinNs) / 1'000'000.0},
+          {"cpu_max_ms", static_cast<double>(stats.cpuMaxNs) / 1'000'000.0},
+          {"gpu_samples", stats.gpuSamples},
+          {"gpu_total_ns", stats.gpuTotalNs},
+          {"gpu_average_ms", gpuAverageMs},
+          {"gpu_min_ms", static_cast<double>(stats.gpuMinNs) / 1'000'000.0},
+          {"gpu_max_ms", static_cast<double>(stats.gpuMaxNs) / 1'000'000.0},
+      });
+    }
+    return nlohmann::json{{"ok", std::move(outputs)}};
+  }
+
   nlohmann::json IpcCommands::keyboardLayouts(Server& server, std::string_view /*arg*/) {
     const auto state = server.keyboardLayoutState();
     if (!state.has_value()) {
@@ -621,6 +677,8 @@ namespace umbriel {
       {"layers", "", "list layer-shell surfaces", false, &IpcCommands::layers, &printLayers},
       {"color", "", "show color-management state", false, &IpcCommands::color, &printColor},
       {"tearing", "", "show tearing-control state", false, &IpcCommands::tearing, &printTearing},
+      {"render-stats", "", "show optional GPU render timing statistics", false, &IpcCommands::renderStats,
+       &printRenderStats},
       {"keyboard-layouts", "", "list keyboard layouts", false, &IpcCommands::keyboardLayouts, &printKeyboardLayouts},
       {"output-create", "<name>", "create a headless output (headless sessions only)", true, &IpcCommands::outputCreate,
        &printOutputName},

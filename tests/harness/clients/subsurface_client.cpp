@@ -60,6 +60,8 @@ namespace {
     // Declare the window geometry once and never again, the way Electron acks a configure and redraws at the new size
     // while leaving set_window_geometry at the size it had before.
     bool staleGeometry = false;
+    bool exitOnClose = false;
+    bool running = true;
     bool geometryDeclared = false;
     int geometryWidth = 0;
     int geometryHeight = 0;
@@ -237,7 +239,12 @@ namespace {
     }
   }
 
-  void toplevelClose(void*, xdg_toplevel*) {}
+  void toplevelClose(void* data, xdg_toplevel*) {
+    auto& state = *static_cast<State*>(data);
+    if (state.exitOnClose) {
+      state.running = false;
+    }
+  }
 
   constexpr xdg_toplevel_listener kToplevelListener = {
       .configure = toplevelConfigure,
@@ -284,6 +291,7 @@ int main(int argc, char** argv) {
   state.transparentContent = std::getenv("TRANSPARENT_CONTENT") != nullptr;
   state.translucentContent = std::getenv("TRANSLUCENT_CONTENT") != nullptr;
   state.staleGeometry = std::getenv("STALE_GEOMETRY") != nullptr;
+  state.exitOnClose = std::getenv("EXIT_ON_CLOSE") != nullptr;
   if (const char* offset = std::getenv("OFFSET_GEOMETRY")) {
     state.offset = std::max(0, std::atoi(offset));
   }
@@ -338,7 +346,7 @@ int main(int argc, char** argv) {
   }
   wl_surface_commit(state.surface);
 
-  while (wl_display_dispatch(state.display) >= 0) {
+  while (state.running && wl_display_dispatch(state.display) >= 0) {
   }
 
   if (state.childFrame != nullptr) {

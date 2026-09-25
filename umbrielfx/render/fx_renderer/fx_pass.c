@@ -639,6 +639,7 @@ static void draw_animation_texture(
   glUniform1f(shader->progress, parameters->progress);
   glUniform1f(shader->linear_progress, parameters->linear_progress);
   glUniform1f(shader->direction, parameters->direction);
+  glUniform1f(shader->depth, parameters->depth);
   glUniform2f(shader->size, logical_box->width, logical_box->height);
   glUniform4fv(shader->random_seed, 1, parameters->random_seed);
   const struct wlr_fbox unit = {.width = 1, .height = 1};
@@ -839,6 +840,145 @@ void fx_render_pass_end_animation(
   fx_render_pass_end_animation_with_history(
       pass, shader, parameters, box, logical_box, transform, clip, clip, NULL, NULL, false
   );
+}
+
+static void prepare_self_blur_shaders(struct fx_renderer* renderer) {
+  if (renderer->self_blur_attempted) {
+    return;
+  }
+  renderer->self_blur_attempted = true;
+  // Test-only fault injection exercises the single-pass and no-shader paths
+  // with the same compiler failure a driver would report. The value is read
+  // once with the programs, and normal sessions never take either branch.
+  const char* failure = getenv("UMBRIEL_TEST_SELF_BLUR_SHADER_FAILURE");
+  const bool fail_all = failure != NULL && strcmp(failure, "all") == 0;
+  const bool fail_axes = fail_all || (failure != NULL && strcmp(failure, "axis") == 0);
+  static const char invalid_source[] = "this is not GLSL";
+  static const char axis_source[] = "uniform vec2 self_step; uniform int self_half;\n"
+                                    "vec4 animation(vec2 uv) {\n"
+                                    " vec4 color = vec4(0.0); float total = 0.0;\n"
+                                    " for (int i = -8; i <= 8; i++) {\n"
+                                    "  if (i < -self_half || i > self_half) continue;\n"
+                                    "  float x = float(i) / max(float(self_half), 1.0);\n"
+                                    "  float weight = exp(-2.0 * x * x);\n"
+                                    "  color += umbriel_sample(uv + float(i) * self_step * umbriel_depth) * weight;\n"
+                                    "  total += weight;\n"
+                                    " } return color / max(total, 0.0001);\n"
+                                    "}\n";
+  static const char single_source[] =
+      "uniform vec2 self_step; uniform int self_half;\n"
+      "vec4 animation(vec2 uv) {\n"
+      " vec4 color = vec4(0.0); float total = 0.0;\n"
+      " for (int y = -2; y <= 2; y++) { for (int x = -2; x <= 2; x++) {\n"
+      "  if (x < -self_half || x > self_half || y < -self_half || y > self_half) continue;\n"
+      "  float d = length(vec2(float(x), float(y))) / max(float(self_half), 1.0);\n"
+      "  float weight = exp(-2.0 * d * d);\n"
+      "  color += umbriel_sample(uv + vec2(float(x), float(y)) * self_step * umbriel_depth) * weight;\n"
+      "  total += weight;\n"
+      " }} return color / max(total, 0.0001);\n"
+      "}\n";
+  renderer->self_blur_horizontal =
+      fx_animation_shader_create(&renderer->wlr_renderer, fail_axes ? invalid_source : axis_source,
+          "internal self blur horizontal");
+  renderer->self_blur_vertical =
+      fx_animation_shader_create(&renderer->wlr_renderer, fail_axes ? invalid_source : axis_source,
+          "internal self blur vertical");
+  renderer->self_blur_single =
+      fx_animation_shader_create(&renderer->wlr_renderer, fail_all ? invalid_source : single_source,
+          "internal self blur fallback");
+}
+
+unsigned fx_render_pass_self_blur_passes(struct fx_gles_render_pass* pass) {
+  struct fx_renderer* renderer = pass->buffer->renderer;
+  prepare_self_blur_shaders(renderer);
+  if (renderer->self_blur_horizontal != NULL && renderer->self_blur_vertical != NULL) {
+    return 2;
+  }
+  return renderer->self_blur_single != NULL ? 1 : 0;
+}
+
+bool fx_render_pass_begin_self_blur_capture(struct fx_gles_render_pass* pass, unsigned capture_index) {
+  // Test-only failure at the offscreen allocation boundary. Keeping it here
+  // exercises the same caller fallback as an allocator/texture rejection
+  // without starving unrelated renderer allocations in the process.
+  static const char* failure = NULL;
+  static bool checked = false;
+  if (!checked) {
+    failure = getenv("UMBRIEL_TEST_SELF_BLUR_CAPTURE_FAILURE");
+    checked = true;
+  }
+  if (failure != NULL
+      && ((capture_index == 0 && strcmp(failure, "first") == 0)
+          || (capture_index == 1 && strcmp(failure, "second") == 0))) {
+    wlr_log(WLR_ERROR, "Injected Self Blur capture allocation failure at index %u", capture_index);
+    return false;
+  }
+  return fx_render_pass_begin_animation(pass);
+}
+
+void fx_render_pass_end_self_blur(
+    struct fx_gles_render_pass* pass, unsigned captures, float depth, float radius, unsigned samples,
+    const struct wlr_box* horizontal_box, const struct wlr_box* horizontal_logical_box, const struct wlr_box* blur_box,
+    const struct wlr_box* blur_logical_box, enum wl_output_transform transform, const pixman_region32_t* clip
+) {
+  assert(captures > 0 && captures <= 2);
+  struct fx_renderer* renderer = pass->buffer->renderer;
+  const unsigned bounded_samples = samples < 3 ? 3 : (samples > 17 ? 17 : samples);
+  const int half = (int)(bounded_samples / 2);
+  struct fx_animation_parameters parameters = {.depth = depth};
+  struct wlr_texture* source = pop_animation_capture(pass);
+
+  if (captures == 2 && renderer->self_blur_horizontal != NULL && renderer->self_blur_vertical != NULL) {
+    struct fx_animation_shader* horizontal = renderer->self_blur_horizontal;
+    glUseProgram(horizontal->program);
+    glUniform1i(glGetUniformLocation(horizontal->program, "self_half"), half);
+    glUniform2f(
+        glGetUniformLocation(horizontal->program, "self_step"),
+        radius / (fmaxf((float)half, 1.0f) * fmaxf((float)horizontal_logical_box->width, 1.0f)), 0.0f
+    );
+    draw_animation_texture(
+        pass, source, horizontal, &parameters, horizontal_box, horizontal_box, horizontal_logical_box, transform, NULL,
+        NULL, NULL, pass->projection_matrix, true, false
+    );
+    wlr_texture_destroy(source);
+    source = pop_animation_capture(pass);
+
+    struct fx_animation_shader* vertical = renderer->self_blur_vertical;
+    glUseProgram(vertical->program);
+    glUniform1i(glGetUniformLocation(vertical->program, "self_half"), half);
+    glUniform2f(
+        glGetUniformLocation(vertical->program, "self_step"), 0.0f,
+        radius / (fmaxf((float)half, 1.0f) * fmaxf((float)blur_logical_box->height, 1.0f))
+    );
+    draw_animation_texture(
+        pass, source, vertical, &parameters, blur_box, blur_box, blur_logical_box, transform, clip, NULL, NULL,
+        pass->projection_matrix, true, true
+    );
+    wlr_texture_destroy(source);
+    return;
+  }
+
+  struct fx_animation_shader* single = renderer->self_blur_single;
+  if (single == NULL) {
+    // Compilation failed after capture began. Composite the subtree unchanged
+    // through whichever axis program survived, preserving scene semantics.
+    single = renderer->self_blur_horizontal != NULL ? renderer->self_blur_horizontal : renderer->self_blur_vertical;
+    parameters.depth = 0.0f;
+  }
+  if (single != NULL) {
+    glUseProgram(single->program);
+    glUniform1i(glGetUniformLocation(single->program, "self_half"), half > 2 ? 2 : half);
+    glUniform2f(
+        glGetUniformLocation(single->program, "self_step"),
+        radius / (fmaxf((float)half, 1.0f) * fmaxf((float)blur_logical_box->width, 1.0f)),
+        radius / (fmaxf((float)half, 1.0f) * fmaxf((float)blur_logical_box->height, 1.0f))
+    );
+    draw_animation_texture(
+        pass, source, single, &parameters, blur_box, blur_box, blur_logical_box, transform, clip, NULL, NULL,
+        pass->projection_matrix, true, true
+    );
+  }
+  wlr_texture_destroy(source);
 }
 
 static void setup_blending(enum wlr_render_blend_mode mode) {

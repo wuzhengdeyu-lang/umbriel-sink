@@ -599,6 +599,25 @@ namespace umbriel {
       return true;
     }
 
+    bool actionWindowSink(Server& server, const Keybind& /*bind*/, std::string* error) {
+      View* view = focusedWindow(server);
+      Workspace* workspace = view != nullptr ? view->workspace() : nullptr;
+      if (view == nullptr || workspace == nullptr) {
+        return reject(error, "window-sink requires a focused workspace window");
+      }
+      if (!workspace->sink(view)) {
+        return reject(error, "window cannot be sunk while pinned, in a scratchpad, transient, locked, or interactive");
+      }
+      return true;
+    }
+
+    bool actionWindowPull(Server& server, const Keybind& /*bind*/, std::string* /*error*/) {
+      if (Workspace* workspace = activeWorkspace(server)) {
+        (void)workspace->pull();
+      }
+      return true;
+    }
+
     bool tiledDragActive(Server& server) {
       const Cursor* cursor = server.cursor();
       return cursor != nullptr && cursor->isDraggingIntoLayout();
@@ -1099,7 +1118,7 @@ namespace umbriel {
       View* current = focusedWindow(server);
       for (const auto& entry : server.registry().all()) {
         View* target = entry.get();
-        if (target == current || !target->mapped() || target->workspace() == nullptr) {
+        if (target == current || !target->mapped() || target->sunk() || target->workspace() == nullptr) {
           continue;
         }
         server.focusView(target, FocusReason::ForeignActivation);
@@ -1138,7 +1157,7 @@ namespace umbriel {
       View* target = nullptr;
       for (const auto& entry : server.registry().all()) {
         View* view = entry.get();
-        if (view == focused || !view->mapped() || view->workspace() != workspace) {
+        if (view == focused || !view->mapped() || view->sunk() || view->workspace() != workspace) {
           continue;
         }
         if (view->floating() != seekFloating) {
@@ -1422,8 +1441,9 @@ namespace umbriel {
         columns.push_back({column.views, column.widthFrac});
       }
       std::vector<View*> floats;
+      std::vector<View*> sunk(source->sunkEntries().begin(), source->sunkEntries().end());
       for (View* view : source->allViews()) {
-        if (view->floating() && !view->pinned()) {
+        if (!view->sunk() && view->floating() && !view->pinned()) {
           floats.push_back(view);
         }
       }
@@ -1448,6 +1468,15 @@ namespace umbriel {
         view->rememberFloatingPosition();
         view->moveToWorkspace(destination);
         view->restoreFloatingPosition();
+      }
+      for (View* view : sunk) {
+        if (view->floating()) {
+          view->rememberFloatingPosition();
+        }
+        view->moveToWorkspace(destination);
+        if (view->floating()) {
+          view->restoreFloatingPosition();
+        }
       }
 
       destination->markArrange();
@@ -1507,16 +1536,22 @@ namespace umbriel {
       const auto snapshotFloats = [](Workspace* ws) {
         std::vector<View*> floats;
         for (View* view : ws->allViews()) {
-          if (view->floating() && !view->pinned()) {
+          if (view->activeFloating() && !view->pinned()) {
             floats.push_back(view);
           }
         }
         return floats;
       };
+      const auto snapshotSunk = [](Workspace* ws) {
+        return std::vector<View*>(ws->sunkEntries().begin(), ws->sunkEntries().end());
+      };
       const std::vector<View*> sourceFloats = snapshotFloats(sourceWs);
       const std::vector<View*> targetFloats = snapshotFloats(targetWs);
+      const std::vector<View*> sourceSunk = snapshotSunk(sourceWs);
+      const std::vector<View*> targetSunk = snapshotSunk(targetWs);
 
-      const auto transfer = [](const LayoutCapture& tiles, const std::vector<View*>& floats, Workspace* dest) {
+      const auto transfer = [](const LayoutCapture& tiles, const std::vector<View*>& floats,
+                               const std::vector<View*>& sunk, Workspace* dest) {
         for (const LayoutMember& member : tiles.members) {
           if (member.view != nullptr) {
             member.view->moveToWorkspace(dest, /*attachToLayout=*/false);
@@ -1526,9 +1561,18 @@ namespace umbriel {
           view->rememberFloatingPosition();
           view->moveToWorkspace(dest, /*attachToLayout=*/false);
         }
+        for (View* view : sunk) {
+          if (view->floating()) {
+            view->rememberFloatingPosition();
+          }
+          view->moveToWorkspace(dest);
+          if (view->floating()) {
+            view->restoreFloatingPosition();
+          }
+        }
       };
-      transfer(sourceTiles, sourceFloats, targetWs);
-      transfer(targetTiles, targetFloats, sourceWs);
+      transfer(sourceTiles, sourceFloats, sourceSunk, targetWs);
+      transfer(targetTiles, targetFloats, targetSunk, sourceWs);
 
       const auto rebuild = [](Workspace* dest, const LayoutCapture& tiles, const std::vector<View*>& floats) {
         if (tiles.snapshot == nullptr || !dest->layout().restoreState(*tiles.snapshot, tiles.members)) {
@@ -1828,6 +1872,8 @@ namespace umbriel {
         &actionCycleHeight<-1>,
         &actionWindowFocusLast,
         &actionWorkspaceFocusLast,
+        &actionWindowSink,
+        &actionWindowPull,
     };
 
     consteval bool everyActionHasHandler() {

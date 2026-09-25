@@ -50,6 +50,19 @@ struct fx_gles_render_pass {
 };
 
 bool fx_render_pass_begin_animation(struct fx_gles_render_pass *pass);
+
+// Persistent subtree effects share the animation capture pool without sharing
+// animation lifetime or frame scheduling. Returns the number of captures that
+// should be opened (two normally, one for the allocation fallback, zero when
+// shader compilation failed).
+unsigned fx_render_pass_self_blur_passes(struct fx_gles_render_pass *pass);
+bool fx_render_pass_begin_self_blur_capture(struct fx_gles_render_pass *pass, unsigned capture_index);
+void fx_render_pass_end_self_blur(struct fx_gles_render_pass *pass,
+	unsigned captures, float depth, float radius, unsigned samples,
+	const struct wlr_box *horizontal_box,
+	const struct wlr_box *horizontal_logical_box,
+	const struct wlr_box *blur_box, const struct wlr_box *blur_logical_box,
+	enum wl_output_transform transform, const pixman_region32_t *clip);
 void fx_render_pass_end_animation(struct fx_gles_render_pass *pass,
 	struct fx_animation_shader *shader, const struct fx_animation_parameters *parameters,
 	const struct wlr_box *box, const struct wlr_box *logical_box,

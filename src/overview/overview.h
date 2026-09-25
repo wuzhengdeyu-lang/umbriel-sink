@@ -34,6 +34,7 @@ namespace umbriel {
   class Output;
   class Server;
   class View;
+  class WindowProjection;
   class Workspace;
   class WorkspaceGroup;
 
@@ -146,29 +147,13 @@ namespace umbriel {
     struct Card;
     struct OutputState;
 
-    struct CardSurface {
-      Card* card = nullptr;
-      wlr_surface* surface = nullptr;
-      wlr_scene_buffer* sourceBuffer = nullptr;
-      wlr_scene_buffer* buffer = nullptr;
-      int sx = 0;
-      int sy = 0;
-      bool isRoot = false;
-      wl_listener commit{};
-      wl_listener destroy{};
-      wl_listener outputSample{};
-      wl_listener frameDone{};
-    };
-
     struct Card {
       Overview* overview = nullptr;
       OutputState* owner = nullptr;
       View* view = nullptr;
       size_t workspaceIndex = 0; // workspace index inside the output's group
       wlr_scene_tree* tree = nullptr;
-      wlr_scene_border* border = nullptr;
-      SurfaceBlur blur;
-      std::vector<std::unique_ptr<CardSurface>> surfaces;
+      std::unique_ptr<WindowProjection> projection;
       wlr_box box{}; // content box in layout coordinates
       wlr_scene_tree* badge = nullptr;
       wlr_scene_rect* badgeRect = nullptr;
@@ -251,12 +236,6 @@ namespace umbriel {
       int gap = 0;
     };
 
-    static void onCardSurfaceCommit(wl_listener* listener, void* data);
-    static void onCardSurfaceDestroy(wl_listener* listener, void* data);
-    static void onCardBufferOutputSample(wl_listener* listener, void* data);
-    static void onCardBufferFrameDone(wl_listener* listener, void* data);
-    static void addCardSurface(wlr_surface* surface, int sx, int sy, void* data);
-    static void syncCardSurface(wlr_surface* surface, int sx, int sy, void* data);
     static void onDesktopSurfaceCommit(wl_listener* listener, void* data);
     static void onDesktopSurfaceDestroy(wl_listener* listener, void* data);
     static void onDesktopMirrorOutputSample(wl_listener* listener, void* data);
@@ -276,7 +255,6 @@ namespace umbriel {
     Card* createCard(OutputState& state, View* view, size_t workspaceIndex);
     void snapshotCardForClose(Card& card);
     void destroyCard(Card* card);
-    static void syncCardBuffer(CardSurface& entry);
     void dropCard(View* view);
     void rebuildCard(View* view);
     [[nodiscard]] OutputState* stateFor(const Output* output);

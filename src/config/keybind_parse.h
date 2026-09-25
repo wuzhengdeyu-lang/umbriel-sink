@@ -149,6 +149,8 @@ namespace umbriel {
     WindowCycleSecondaryExtentBack,
     WindowFocusLast,
     WorkspaceFocusLast,
+    WindowSink,
+    WindowPull,
     Count,
   };
 

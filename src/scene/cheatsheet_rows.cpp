@@ -351,6 +351,8 @@ namespace {
     case A::LayoutMasterCountDecrease:
       return Group::MoveSize;
     case A::WindowClose:
+    case A::WindowSink:
+    case A::WindowPull:
     case A::ToggleFloating:
     case A::ToggleMaximize:
     case A::ToggleMaximizeToEdges:

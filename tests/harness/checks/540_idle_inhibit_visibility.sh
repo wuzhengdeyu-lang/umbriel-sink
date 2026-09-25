@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# A visible toplevel inhibits idle, then stops inhibiting as soon as its
-# workspace becomes inactive while its process and protocol objects stay alive.
+# A visible toplevel inhibits idle, stops inhibiting in Sink, resumes after
+# Pull, and stops again on an inactive workspace while its protocol stays alive.
 set -euo pipefail
 
 readonly CLIENT="${UMBRIEL_IDLE_INHIBIT_CLIENT:-./build-debug/tests/idle-inhibit-client}"
@@ -23,14 +23,34 @@ if grep -q '^idled$' "$CLIENT_LOG"; then
   exit 1
 fi
 
-"$UMBRIEL" msg workspace-switch:2 > /dev/null
+"$UMBRIEL" msg window-sink > /dev/null
 for _ in $(seq 40); do
   grep -q '^idled$' "$CLIENT_LOG" && break
   sleep 0.05
 done
 if ! grep -q '^idled$' "$CLIENT_LOG"; then
-  echo "hidden surface continued to inhibit idle: $(cat "$CLIENT_LOG")"
+  echo "Sunk surface continued to inhibit idle: $(cat "$CLIENT_LOG")"
   exit 1
 fi
 
-echo "idle inhibitor follows toplevel workspace visibility"
+"$UMBRIEL" msg window-pull > /dev/null
+for _ in $(seq 40); do
+  grep -q '^resumed$' "$CLIENT_LOG" && break
+  sleep 0.05
+done
+if ! grep -q '^resumed$' "$CLIENT_LOG"; then
+  echo "Pull did not restore the visible idle inhibitor: $(cat "$CLIENT_LOG")"
+  exit 1
+fi
+
+"$UMBRIEL" msg workspace-switch:2 > /dev/null
+for _ in $(seq 40); do
+  [[ $(grep -c '^idled$' "$CLIENT_LOG") -ge 2 ]] && break
+  sleep 0.05
+done
+if [[ $(grep -c '^idled$' "$CLIENT_LOG") -lt 2 ]]; then
+  echo "inactive workspace continued to inhibit idle: $(cat "$CLIENT_LOG")"
+  exit 1
+fi
+
+echo "idle inhibitor follows Sink and workspace visibility"

@@ -30,6 +30,14 @@
 
 namespace umbriel {
 
+  struct PendingRenderTimer {
+    ~PendingRenderTimer() { wlr_scene_timer_finish(&timer); }
+
+    wlr_scene_timer timer{};
+    uint8_t age = 0;
+    bool sample = false;
+  };
+
   namespace {
     constexpr Logger kLog("output");
     constexpr int kFrameRetryDelayMs = 16;
@@ -50,6 +58,8 @@ namespace umbriel {
 
   Output::Output(Server& server, wlr_output* output)
       : m_server(&server), m_output(output), m_defaultScale(output->scale) {
+    const char* renderTiming = std::getenv("UMBRIEL_RENDER_TIMING");
+    m_renderTiming.enabled = renderTiming != nullptr && std::string_view(renderTiming) == "1";
     m_output->data = this;
     wlr_output_init_render(m_output, m_server->allocator(), m_server->renderer());
 
@@ -121,7 +131,8 @@ namespace umbriel {
 
   bool Output::hdrRequested() const {
     if (wlr_surface* surface = m_server->seat()->wlr()->keyboard_state.focused_surface) {
-      if (View* view = View::fromSurface(surface); view != nullptr && view->mapped() && view->currentOutput() == this) {
+      if (View* view = View::fromSurface(surface);
+          view != nullptr && view->mapped() && !view->sunk() && view->currentOutput() == this) {
         if (const std::optional<HdrMode> mode = view->resolvedRules().hdr) {
           const bool fullscreen = view->layoutFullscreen() || view->toplevel()->current.fullscreen;
           return hdrEnabled(*mode, fullscreen, autoHdrEligible(view));
@@ -157,6 +168,7 @@ namespace umbriel {
     const auto eligible = [this](View* view) {
       return view != nullptr
           && view->mapped()
+          && !view->sunk()
           && view->onActiveWorkspace()
           && view->currentOutput() == this
           && view->layoutFullscreen()
@@ -453,11 +465,14 @@ namespace umbriel {
     return effectiveVrrEnabled(outputMode, fullscreen, focusedMode, focusedFullscreen);
   }
 
+  bool Output::vrrRequested() const { return configuredVrrEnabled(); }
+
   bool Output::hasFullscreenView(const View* ignored) const {
     const Workspace* workspace = m_workspaceGroup != nullptr ? m_workspaceGroup->active() : nullptr;
     return workspace != nullptr && std::ranges::any_of(workspace->allViews(), [ignored](const View* view) {
              return view != ignored
                  && view->mapped()
+                 && !view->sunk()
                  && (view->layoutFullscreen() || view->toplevel()->current.fullscreen);
            });
   }
@@ -465,6 +480,7 @@ namespace umbriel {
   bool Output::autoHdrEligible(const View* view) const {
     if (view == nullptr
         || !view->mapped()
+        || view->sunk()
         || !view->onActiveWorkspace()
         || view->currentOutput() != this
         || (!view->layoutFullscreen() && !view->toplevel()->current.fullscreen)) {
@@ -974,6 +990,8 @@ namespace umbriel {
     if (!outputFrameAllowed(m_server->stopping(), m_server->session())) {
       return;
     }
+    ++m_renderTiming.frameCallbacks;
+    collectRenderTimings();
     if (m_frameRetryTimer != nullptr) {
       wl_event_source_timer_update(m_frameRetryTimer, 0);
     }
@@ -1064,6 +1082,7 @@ namespace umbriel {
     // false forever -> compositor parks in epoll_wait. (Reproducible with any mailbox/FIFO Vulkan game.)
     bool commitFailed = false;
     if (wlr_scene_output_needs_frame(m_sceneOutput) || m_gammaDirty) {
+      ++m_renderTiming.renderedFrames;
       m_inFrame = true;
       UMBRIEL_ZONE("Output::render");
 
@@ -1081,8 +1100,18 @@ namespace umbriel {
         }
       }
       wlr_scene_output_state_options sceneOptions{};
+      std::unique_ptr<PendingRenderTimer> renderTimer;
+      if (m_renderTiming.enabled && m_renderTimerFailures < 4) {
+        renderTimer = std::make_unique<PendingRenderTimer>();
+        sceneOptions.timer = &renderTimer->timer;
+      }
+      timespec cpuStart{};
+      if (m_renderTiming.enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &cpuStart);
+      }
       sceneOptions.capture_sdr = hdrActive() && captureLocks > 0;
-      if (wlr_scene_output_build_state(m_sceneOutput, &state, &sceneOptions)) {
+      const bool sceneBuilt = wlr_scene_output_build_state(m_sceneOutput, &state, &sceneOptions);
+      if (sceneBuilt) {
         // Hardware gamma only (DRM). Nested Wayland has no gamma LUT; leave that alone.
         // Apply only when dirty: uploading the LUT every frame stalls the compositor.
         bool gammaPending = false;
@@ -1148,8 +1177,26 @@ namespace umbriel {
       }
 
       wlr_output_state_finish(&state);
+      if (m_renderTiming.enabled && sceneBuilt) {
+        timespec cpuEnd{};
+        clock_gettime(CLOCK_MONOTONIC, &cpuEnd);
+        const int64_t seconds = cpuEnd.tv_sec - cpuStart.tv_sec;
+        const int64_t nanosecondRemainder = cpuEnd.tv_nsec - cpuStart.tv_nsec;
+        const uint64_t nanoseconds = static_cast<uint64_t>(seconds * 1'000'000'000LL + nanosecondRemainder);
+        ++m_renderTiming.cpuSamples;
+        m_renderTiming.cpuTotalNs += nanoseconds;
+        m_renderTiming.cpuMinNs =
+            m_renderTiming.cpuSamples == 1 ? nanoseconds : std::min(m_renderTiming.cpuMinNs, nanoseconds);
+        m_renderTiming.cpuMaxNs = std::max(m_renderTiming.cpuMaxNs, nanoseconds);
+      }
+      if (renderTimer != nullptr) {
+        renderTimer->sample = sceneBuilt;
+        m_pendingRenderTimers.push_back(std::move(renderTimer));
+      }
       m_inFrame = false;
       commitFailed = !commitOk;
+    } else {
+      ++m_renderTiming.idleCallbacks;
     }
 
     // A request_state that arrived mid-commit is applied now that we're out of it.
@@ -1182,6 +1229,29 @@ namespace umbriel {
 
     // Unconditional: see comment above. Never gate this on commit success.
     wlr_scene_output_send_frame_done(m_sceneOutput, &now);
+  }
+
+  void Output::collectRenderTimings() {
+    for (auto iterator = m_pendingRenderTimers.begin(); iterator != m_pendingRenderTimers.end();) {
+      PendingRenderTimer& pending = **iterator;
+      ++pending.age;
+      if (pending.age < 3) {
+        ++iterator;
+        continue;
+      }
+      const int64_t duration = wlr_scene_timer_get_duration_ns(&pending.timer);
+      if (pending.sample && duration >= 0) {
+        const uint64_t nanoseconds = static_cast<uint64_t>(duration);
+        ++m_renderTiming.gpuSamples;
+        m_renderTiming.gpuTotalNs += nanoseconds;
+        m_renderTiming.gpuMinNs =
+            m_renderTiming.gpuSamples == 1 ? nanoseconds : std::min(m_renderTiming.gpuMinNs, nanoseconds);
+        m_renderTiming.gpuMaxNs = std::max(m_renderTiming.gpuMaxNs, nanoseconds);
+      } else if (duration < 0) {
+        ++m_renderTimerFailures;
+      }
+      iterator = m_pendingRenderTimers.erase(iterator);
+    }
   }
 
   void Output::handleRequestState(void* data) {

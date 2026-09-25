@@ -38,7 +38,10 @@ namespace {
     std::println("idled");
     std::fflush(stdout);
   }
-  void idleResumed(void*, ext_idle_notification_v1*) {}
+  void idleResumed(void*, ext_idle_notification_v1*) {
+    std::println("resumed");
+    std::fflush(stdout);
+  }
   constexpr ext_idle_notification_v1_listener kIdleListener = {
       .idled = idleIdled,
       .resumed = idleResumed,

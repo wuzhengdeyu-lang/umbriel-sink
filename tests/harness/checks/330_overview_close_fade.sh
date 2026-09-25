@@ -73,6 +73,16 @@ color_pixels() {
     -format '%[fx:round(mean*w*h)]\n' info:
 }
 
+sleep_until_ms() {
+  local deadline_ms=$1 now_ms remaining_ms delay
+  now_ms=$(date +%s%3N)
+  remaining_ms=$((deadline_ms - now_ms))
+  if ((remaining_ms > 0)); then
+    printf -v delay '%d.%03d' $((remaining_ms / 1000)) $((remaining_ms % 1000))
+    sleep "$delay"
+  fi
+}
+
 FILL_COLOR=0xFF0000FF "$UMBRIEL_UNMAP_CLIENT" overview-close-first 1200 700 > "$FIRST_LOG" 2>&1 &
 for _ in $(seq 80); do
   first=$("$UMBRIEL" windows --json | jq -c '.[] | select(.title == "overview-close-first")')
@@ -101,6 +111,7 @@ if [[ $("$UMBRIEL" windows --json | jq length) -ne 2 ]]; then
   echo "second overview close client never mapped"
   exit 1
 fi
+admitted_ms=$(date +%s%3N)
 sleep 0.12
 grim "$MOVING"
 moving_red=$(color_pixels "$MOVING" 'r > 0.8 && g < 0.1 && b < 0.1')
@@ -116,15 +127,16 @@ if ((moving_cyan > 200)); then
   exit 1
 fi
 
-# windows_move ends 1600 ms after the admission; windows_in then runs for 600 ms on the settled card.
-sleep 1.75
+# windows_move ends 1600 ms after the admission; windows_in then runs for 600 ms on the settled card. Screenshot and
+# ImageMagick time varies by GPU, so sample against admission time rather than adding a fixed delay after MOVING.
+sleep_until_ms "$((admitted_ms + 1850))"
 grim "$OPENING"
 opening_dim=$(color_pixels "$OPENING" 'g > 0.08 && g < 0.7 && b > 0.08 && b < 0.7 && r < 0.1')
 if ((opening_dim < 1000)); then
   echo "the overview opener did not fade in after the reflow: dim=$opening_dim"
   exit 1
 fi
-sleep 0.55
+sleep_until_ms "$((admitted_ms + 2450))"
 grim "$OPENED"
 opened_cyan=$(color_pixels "$OPENED" 'g > 0.8 && b > 0.8 && r < 0.1')
 if ((opened_cyan < 1000)); then

@@ -3,6 +3,7 @@
 #include "core/animation.h"
 #include "layout/layout.h"
 #include "layout/layout_motion.h"
+#include "workspace/sink_stack.h"
 
 #include <array>
 #include <cstddef>
@@ -18,6 +19,7 @@ struct wlr_ext_workspace_group_handle_v1;
 struct wlr_ext_workspace_handle_v1;
 struct wlr_ext_workspace_manager_v1;
 struct wlr_scene_tree;
+struct wl_event_source;
 
 namespace umbriel {
 
@@ -27,6 +29,7 @@ namespace umbriel {
   class ScrollingLayout;
   class Server;
   class View;
+  class WindowProjection;
   class WorkspaceGroup;
 
   enum class LayoutAttachOrigin {
@@ -95,6 +98,7 @@ namespace umbriel {
     void clearLayoutModeOverride() { m_layoutModeOverride.reset(); }
     [[nodiscard]] View* focusedView() const { return m_focusedView; }
     [[nodiscard]] wlr_scene_tree* viewLayer(bool tiled) const { return tiled ? m_tiledLayer : m_floatingLayer; }
+    [[nodiscard]] wlr_scene_tree* sinkLayer() const { return m_sinkLayer; }
     [[nodiscard]] wlr_scene_tree* shadowLayer() const { return m_shadowLayer; }
     [[nodiscard]] wlr_scene_tree* fullscreenTree() const { return m_fullscreenTree; }
     [[nodiscard]] bool switchTransitionActive() const { return m_inSwitchTransition; }
@@ -106,7 +110,23 @@ namespace umbriel {
     void syncFloatingStack(View* view);
     void restackFloatingViews();
     void addView(View* view, bool attachToLayout = true);
-    View* removeView(View* view, bool reconcile = true);
+    View* removeView(View* view, bool reconcile = true, bool preserveSink = false);
+    [[nodiscard]] bool sink(View* view);
+    [[nodiscard]] View* pull(bool focus = true);
+    [[nodiscard]] bool unwindTo(View* view);
+    [[nodiscard]] bool containsSunk(const View* view) const { return m_sinkStack.contains(view); }
+    [[nodiscard]] std::optional<size_t> sinkDepth(const View* view) const { return m_sinkStack.depth(view); }
+    [[nodiscard]] size_t sinkCount() const { return m_sinkStack.size(); }
+    // Bottom-to-top order. Transfers append this sequence to the destination,
+    // preserving the source's internal LIFO order while retaining the
+    // destination stack below it.
+    [[nodiscard]] const std::vector<View*>& sunkEntries() const { return m_sinkStack.entries(); }
+    void removeFromSinkStack(View* view);
+    void refreshSinkPresentation(bool animate = true);
+    void onViewCommitted(View* view);
+    void deferProjectionFocus(View* view);
+    bool tickSinkAnimations(uint64_t nowMsec);
+    [[nodiscard]] bool sinkAnimationsActive() const;
     void layoutAttach(
         View* view, std::optional<double> initialExtent = std::nullopt,
         std::optional<int> initialExtentPx = std::nullopt, LayoutAttachOrigin origin = LayoutAttachOrigin::ExistingView
@@ -206,6 +226,28 @@ namespace umbriel {
     }
 
   private:
+    struct SinkPresentation {
+      Workspace* workspace = nullptr;
+      View* view = nullptr;
+      std::unique_ptr<WindowProjection> projection;
+      wlr_box sourceBox{};
+      uint64_t generation = 0;
+      wl_event_source* deadline = nullptr;
+      bool pulling = false;
+      bool focusOnComplete = false;
+      bool animationDone = false;
+      bool barrierTimedOut = false;
+    };
+
+    static int onSinkPullDeadline(void* data);
+    [[nodiscard]] SinkPresentation* sinkPresentationFor(const View* view) const;
+    [[nodiscard]] SinkPresentation& ensureSinkPresentation(View* view, const wlr_box& sourceBox);
+    [[nodiscard]] wlr_box sinkTargetBox(const SinkPresentation& presentation, size_t depth) const;
+    void beginPullPresentation(View* view, bool focus);
+    void maybeFinishPullPresentation(SinkPresentation& presentation);
+    void finishPullPresentation(View* view, uint64_t generation);
+    void discardSinkPresentation(View* view);
+
     // `resized` lists the members whose assigned size this arrange changed.
     void applyPositions(bool animate, std::span<View* const> resized);
     [[nodiscard]] wlr_box tiledTargetBox(const View* view, const wlr_box& usable) const;
@@ -246,6 +288,8 @@ namespace umbriel {
     bool m_active = false;
     std::vector<View*> m_views;
     std::vector<View*> m_floatingStack;
+    SinkStack<View> m_sinkStack;
+    std::vector<std::unique_ptr<SinkPresentation>> m_sinkPresentations;
     std::unique_ptr<Layout> m_layout;
     ResolvedLayoutConfig m_layoutConfig;
     LayoutMode m_layoutMode = LayoutMode::Scrolling;
@@ -263,6 +307,7 @@ namespace umbriel {
     int m_slideOffsetY = 0;
     std::vector<View*> m_switchViews;
     wlr_scene_tree* m_tree = nullptr;
+    wlr_scene_tree* m_sinkLayer = nullptr;
     wlr_scene_tree* m_shadowLayer = nullptr;
     wlr_scene_tree* m_tiledLayer = nullptr;
     wlr_scene_tree* m_floatingLayer = nullptr;
@@ -331,6 +376,7 @@ namespace umbriel {
     bool moveActiveWorkspace(int direction);
     void reconcileInventory();
     void refreshLayouts();
+    void refreshSinkPresentations(bool animate = false);
     // Re-resolve the output's workspace axis, settling any live slide on the old
     // axis first. Called before per-workspace layout resolution.
     void refreshWorkspaceAxis();

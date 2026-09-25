@@ -123,11 +123,30 @@ Sizing rules per layout live in [Sizing behavior](layout.md#sizing-behavior).
 | Action | Effect |
 |--------|--------|
 | `window-close:[<window-id>]` | Close the focused window, or the given window |
+| `window-pull` | Restore the most recently sunk window |
+| `window-sink` | Move the focused window into the workspace sink stack |
 | `window-toggle-floating:[<window-id>]` | Float or tile the focused window, or the given window |
 | `window-toggle-fullscreen` | Toggle fullscreen or exit a window covering the focus |
 | `window-toggle-maximize` | Toggle full width for the focused column |
 | `window-toggle-maximize-to-edges` | Toggle maximize without gaps, struts, or borders |
 | `window-toggle-pinned` | Pin the focused window above other windows |
+
+Sunk windows are presented as non-interactive, centered projections without
+resizing the client. By default, the top entry uses 93% scale and 82% opacity,
+the next entry uses 85% scale and 45% opacity, and deeper entries remain in the
+logical stack but are not rendered. `[appearance.sink].visible_depth` and
+`levels` can change this presentation without changing stack order. Pull animates
+the projection back to its normal
+placement and does not hand focus or input to the live surface until the
+required resize commit arrives; an unresponsive client falls back after a
+bounded wait instead of blocking the compositor.
+
+Fullscreen and maximize remain window states while an entry is sunk. Their
+live scene and fullscreen backdrop do not become foreground owners; Pull
+restores the current state through the normal layout path. Overview shows one
+passive card for a sunk window, and explicitly selecting that card unwinds the
+stack through the selected entry. Moving a workspace or evacuating an output
+keeps sunk entries sunk and preserves each source stack's LIFO order.
 
 ## Scratchpad
 

@@ -143,7 +143,9 @@ tearing = true
 Umbriel uses asynchronous presentation only for an eligible fullscreen window
 that requests it or matches a `tearing = true` window rule. A window rule can
 also veto a client request. Run `umbriel tearing` to inspect eligibility and
-fallback reasons.
+fallback reasons. Its JSON form also reports `vrr_requested`, the current
+logical adaptive-sync policy request before backend capability and fallback
+handling.
 
 ### HDR
 

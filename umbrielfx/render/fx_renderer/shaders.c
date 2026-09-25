@@ -1,30 +1,32 @@
+#include "render/fx_renderer/shaders.h"
+
+#include "render/egl.h"
+#include "render/fx_renderer/fx_renderer.h"
+
 #include <EGL/egl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <wlr/util/log.h>
+#include <umbrielfx/render/animation.h>
 #include <umbrielfx/types/fx/clipped_region.h>
 
-#include "render/fx_renderer/shaders.h"
-#include "render/fx_renderer/fx_renderer.h"
-#include "render/egl.h"
-#include <umbrielfx/render/animation.h>
+#include <wlr/util/log.h>
 
 // shaders
 #include "GLES2/gl2.h"
-#include "common_vert_src.h"
-#include "gradient_frag_src.h"
-#include "corner_alpha_frag_src.h"
-#include "quad_frag_src.h"
-#include "quad_grad_frag_src.h"
-#include "quad_round_frag_src.h"
-#include "border_frag_src.h"
-#include "quad_grad_round_frag_src.h"
-#include "tex_frag_src.h"
-#include "output_frag_src.h"
-#include "box_shadow_frag_src.h"
 #include "blur1_frag_src.h"
 #include "blur2_frag_src.h"
 #include "blur_effects_frag_src.h"
+#include "border_frag_src.h"
+#include "box_shadow_frag_src.h"
+#include "common_vert_src.h"
+#include "corner_alpha_frag_src.h"
+#include "gradient_frag_src.h"
+#include "output_frag_src.h"
+#include "quad_frag_src.h"
+#include "quad_grad_frag_src.h"
+#include "quad_grad_round_frag_src.h"
+#include "quad_round_frag_src.h"
+#include "tex_frag_src.h"
 
 GLuint compile_shader(GLuint type, const GLchar *src) {
 	GLuint shader = glCreateShader(type);
@@ -125,6 +127,7 @@ struct fx_animation_shader *fx_animation_shader_create(struct wlr_renderer *rend
 		"uniform float umbriel_progress;\n"
 		"uniform float umbriel_linear_progress;\n"
 		"uniform float umbriel_direction;\n"
+		"uniform float umbriel_depth;\n"
 		"uniform vec2 umbriel_size;\n"
 		"uniform vec4 umbriel_random_seed;\n"
 		"#define umbriel_clamped_progress clamp(umbriel_progress, 0.0, 1.0)\n"
@@ -185,6 +188,7 @@ struct fx_animation_shader *fx_animation_shader_create(struct wlr_renderer *rend
 	shader->progress = glGetUniformLocation(shader->program, "umbriel_progress");
 	shader->linear_progress = glGetUniformLocation(shader->program, "umbriel_linear_progress");
 	shader->direction = glGetUniformLocation(shader->program, "umbriel_direction");
+	shader->depth = glGetUniformLocation(shader->program, "umbriel_depth");
 	shader->size = glGetUniformLocation(shader->program, "umbriel_size");
 	shader->random_seed = glGetUniformLocation(shader->program, "umbriel_random_seed");
 	wlr_egl_restore_context(&previous);

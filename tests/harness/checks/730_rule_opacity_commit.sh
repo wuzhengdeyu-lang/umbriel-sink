@@ -4,6 +4,7 @@
 set -euo pipefail
 
 readonly SCREENSHOT="$UMBRIEL_RUNTIME_DIR/rule-opacity-commit.png"
+readonly FOOT_COLORS_SECTION="${UMBRIEL_FOOT_COLORS_SECTION:-colors}"
 
 cat >> "$UMBRIEL_CONFIG" <<'EOF'
 
@@ -24,7 +25,7 @@ opacity = 0.5
 EOF
 "$UMBRIEL" msg config-reload > /dev/null
 
-foot --config=/dev/null --app-id=opacity-commit --override=colors.background=000000 \
+foot --config=/dev/null --app-id=opacity-commit --override="$FOOT_COLORS_SECTION.background=000000" \
   sh -c 'while :; do printf "\\r%08d" "$RANDOM"; sleep 0.02; done' > /dev/null 2>&1 &
 
 for _ in $(seq 60); do

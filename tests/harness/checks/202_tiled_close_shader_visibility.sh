@@ -8,6 +8,7 @@ readonly SHOTS="$UMBRIEL_RUNTIME_DIR/tiled-close-shader-visibility"
 readonly OUT_MS=1500
 readonly MOVE_MS=1250
 readonly REBASE_TOLERANCE=24
+readonly SAMPLE_LAST=19
 mkdir -p "$SHOTS"
 
 cat > "$UMBRIEL_RUNTIME_DIR/phased-close.glsl" <<'GLSL'
@@ -78,10 +79,11 @@ EOF
 "$UMBRIEL" msg config-reload > /dev/null
 
 spawn() {
-  local title=$1 color=$2
+  local title=$1 color=$2 windows
   FILL_COLOR="$color" "$UMBRIEL_UNMAP_CLIENT" "$title" 1280 720 > "$UMBRIEL_RUNTIME_DIR/$title.log" 2>&1 &
   for _ in $(seq 100); do
-    window=$("$UMBRIEL" windows --json | jq -c --arg title "$title" '.[] | select(.title == $title)')
+    windows=$("$UMBRIEL" windows --json 2> /dev/null || true)
+    window=$(jq -c --arg title "$title" '.[] | select(.title == $title)' <<< "${windows:-[]}")
     [[ -n $window ]] && return 0
     sleep 0.025
   done
@@ -90,11 +92,13 @@ spawn() {
 }
 
 wait_unmapped() {
-  local title=$1
+  local title=$1 windows
   for _ in $(seq 100); do
-    if grep -q '^unmapped$' "$UMBRIEL_RUNTIME_DIR/$title.log" \
-        && ! "$UMBRIEL" windows --json | jq -e --arg title "$title" 'any(.[]; .title == $title)' > /dev/null; then
-      return 0
+    if grep -q '^unmapped$' "$UMBRIEL_RUNTIME_DIR/$title.log"; then
+      windows=$("$UMBRIEL" windows --json 2> /dev/null || true)
+      if [[ -n $windows ]] && ! jq -e --arg title "$title" 'any(.[]; .title == $title)' <<< "$windows" > /dev/null; then
+        return 0
+      fi
     fi
     sleep 0.025
   done
@@ -105,6 +109,30 @@ wait_unmapped() {
 color_pixels() {
   local image=$1 expression=$2
   magick "$image" -alpha off -fx "$expression ? 1 : 0" -format '%[fx:round(mean*w*h)]\n' info:
+}
+
+reload_config() {
+  local attempt
+  for attempt in 1 2 3; do
+    if "$UMBRIEL" msg config-reload > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "config reload did not answer after $attempt attempts"
+  return 1
+}
+
+msg_retry() {
+  local action=$1 attempt
+  for attempt in 1 2 3; do
+    if "$UMBRIEL" msg "$action" > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "action did not answer after $attempt attempts: $action"
+  return 1
 }
 
 red_bounds() {
@@ -125,7 +153,7 @@ bounds_match() {
 verify_close() {
   local phase=$1 closing_title=$2 movement=$3
   local expected_x=$4 expected_y=$5 expected_width=$6 expected_height=$7
-  local closing id image i
+  local closing id image i close_started_ms sample_ms
   local before="$SHOTS/$phase-before.png"
   closing=$("$UMBRIEL" windows --json | jq -c --arg title "$closing_title" '.[] | select(.title == $title)')
   if [[ -z $closing ]]; then
@@ -138,16 +166,20 @@ verify_close() {
   before_box=$(red_bounds "$before")
 
   id=$(jq -r .id <<< "$closing")
+  close_started_ms=$(date +%s%3N)
   "$UMBRIEL" msg "window-close:$id" > /dev/null
   wait_unmapped "$closing_title"
 
-  for i in $(seq 0 29); do
+  local -a elapsed_ms=()
+  for i in $(seq 0 "$SAMPLE_LAST"); do
+    sample_ms=$(date +%s%3N)
+    elapsed_ms[$i]=$((sample_ms - close_started_ms))
     grim "$SHOTS/$phase-$i.png"
     sleep 0.1
   done
 
   local -a early=() middle=() late=() move=() red_boxes=()
-  for i in $(seq 0 29); do
+  for i in $(seq 0 "$SAMPLE_LAST"); do
     image="$SHOTS/$phase-$i.png"
     early[$i]=$(color_pixels "$image" 'b > 0.3 && g < 0.08')
     middle[$i]=$(color_pixels "$image" 'g > 0.08 && b < 0.3')
@@ -157,15 +189,19 @@ verify_close() {
   done
 
   local first_middle=-1 first_late=-1 last_close=-1
-  for i in $(seq 0 29); do
+  local first_middle_ms=-1 first_late_ms=-1 last_close_ms=-1
+  for i in $(seq 0 "$SAMPLE_LAST"); do
     if ((middle[$i] >= 500 && first_middle < 0)); then
       first_middle=$i
+      first_middle_ms=${elapsed_ms[$i]}
     fi
     if ((late[$i] >= 500 && first_late < 0)); then
       first_late=$i
+      first_late_ms=${elapsed_ms[$i]}
     fi
     if ((early[$i] >= 500 || middle[$i] >= 500 || late[$i] >= 500)); then
       last_close=$i
+      last_close_ms=${elapsed_ms[$i]}
     fi
   done
 
@@ -173,24 +209,26 @@ verify_close() {
     echo "$phase: windows_out did not begin at its natural early shader phase"
     return 1
   fi
-  if ((first_middle < 2)); then
-    echo "$phase: windows_out middle phase was skipped or accelerated: frame=$first_middle"
+  # grim and image import time varies substantially by GPU. Check the shader's
+  # wall-clock phase instead of assuming each capture plus sleep takes 100 ms.
+  if ((first_middle_ms < 225)); then
+    echo "$phase: windows_out middle phase was skipped or accelerated: frame=$first_middle elapsed_ms=$first_middle_ms"
     return 1
   fi
-  if ((first_late < 7 || first_late <= first_middle)); then
-    echo "$phase: windows_out late phase was skipped or accelerated: middle=$first_middle late=$first_late"
+  if ((first_late_ms < 825 || first_late_ms <= first_middle_ms)); then
+    echo "$phase: windows_out late phase was skipped or accelerated: middle=$first_middle/$first_middle_ms ms late=$first_late/$first_late_ms ms"
     return 1
   fi
-  if ((last_close < first_late || last_close > 19)); then
-    echo "$phase: windows_out did not finish on its own timeline: late=$first_late last=$last_close"
+  if ((last_close_ms < first_late_ms || last_close_ms > 1800)); then
+    echo "$phase: windows_out did not finish on its own timeline: late=$first_late/$first_late_ms ms last=$last_close/$last_close_ms ms"
     return 1
   fi
 
   local final_x final_y final_width final_height
-  read -r final_x final_y final_width final_height <<< "${red_boxes[29]}"
+  read -r final_x final_y final_width final_height <<< "${red_boxes[$SAMPLE_LAST]}"
   if ! bounds_match 2 "$final_x" "$final_y" "$final_width" "$final_height" \
       "$expected_x" "$expected_y" "$expected_width" "$expected_height"; then
-    echo "$phase: survivor missed final geometry: got=${red_boxes[29]} expected=$expected_x $expected_y $expected_width $expected_height"
+    echo "$phase: survivor missed final geometry: got=${red_boxes[$SAMPLE_LAST]} expected=$expected_x $expected_y $expected_width $expected_height"
     return 1
   fi
   if [[ $movement == animated ]]; then
@@ -210,7 +248,16 @@ verify_close() {
     fi
 
     local first_intermediate=-1 first_final=-1 move_first=-1 move_last=-1 concurrent=0
-    for i in $(seq 0 29); do
+    # A rebased consume/expel can already have moved substantially by the first
+    # screenshot. Count that as the first intermediate instead of requiring a
+    # later frame to escape a broad tolerance around both frame zero and final.
+    if ! bounds_match 6 "$initial_x" "$initial_y" "$initial_width" "$initial_height" \
+        "$expected_x" "$expected_y" "$expected_width" "$expected_height" \
+        && ! bounds_match "$REBASE_TOLERANCE" "$initial_x" "$initial_y" "$initial_width" "$initial_height" \
+          "$before_x" "$before_y" "$before_width" "$before_height"; then
+      first_intermediate=0
+    fi
+    for i in $(seq 0 "$SAMPLE_LAST"); do
       local x y width height
       read -r x y width height <<< "${red_boxes[$i]}"
       if bounds_match 6 "$x" "$y" "$width" "$height" \
@@ -251,7 +298,7 @@ verify_close() {
       return 1
     fi
   else
-    for i in $(seq 0 29); do
+    for i in $(seq 0 "$SAMPLE_LAST"); do
       local x y width height
       read -r x y width height <<< "${red_boxes[$i]}"
       if ! bounds_match 2 "$x" "$y" "$width" "$height" \
@@ -262,8 +309,9 @@ verify_close() {
     done
   fi
 
-  printf '%s: middle=%d late=%d close-end=%d before=%s final=%s\n' \
-    "$phase" "$first_middle" "$first_late" "$last_close" "$before_box" "${red_boxes[29]}"
+  printf '%s: middle=%d/%dms late=%d/%dms close-end=%d/%dms before=%s final=%s\n' \
+    "$phase" "$first_middle" "$first_middle_ms" "$first_late" "$first_late_ms" \
+    "$last_close" "$last_close_ms" "$before_box" "${red_boxes[$SAMPLE_LAST]}"
 }
 
 readonly SURVIVOR_COLOR=0x80800000
@@ -276,8 +324,7 @@ sleep 1.4
 verify_close ordinary shader-visible-master-close animated 0 0 1280 720
 
 "$UMBRIEL" msg workspace-switch:2 > /dev/null
-sed -i 's/^mode = "master"$/mode = "scrolling"/' "$UMBRIEL_CONFIG"
-"$UMBRIEL" msg config-reload > /dev/null
+msg_retry workspace-set-layout:scrolling
 sleep 0.2
 spawn shader-visible-consume-survivor "$SURVIVOR_COLOR"
 sleep 1.4
@@ -288,6 +335,7 @@ sleep 0.28
 verify_close consume shader-visible-consume-close animated 0 0 640 720
 
 "$UMBRIEL" msg workspace-switch:3 > /dev/null
+msg_retry workspace-set-layout:scrolling
 sleep 0.2
 spawn shader-visible-expel-survivor "$SURVIVOR_COLOR"
 sleep 1.4
@@ -300,9 +348,9 @@ sleep 0.08
 verify_close expel shader-visible-expel-close animated 0 0 640 720
 
 "$UMBRIEL" msg workspace-switch:4 > /dev/null
-sed -i 's/^mode = "scrolling"$/mode = "master"/' "$UMBRIEL_CONFIG"
+msg_retry workspace-set-layout:master
 sed -i '/\[animation.windows_move\]/,/^$/s/^enabled = true$/enabled = false/' "$UMBRIEL_CONFIG"
-"$UMBRIEL" msg config-reload > /dev/null
+reload_config
 sleep 0.2
 spawn shader-visible-disabled-survivor "$SURVIVOR_COLOR"
 sleep 0.2

@@ -1,0 +1,9 @@
+# Fork-only overlay: load the official Umbriel config, including its theme,
+# keybinds, rules and optional files. The official session never reads this.
+[include]
+files = ["../umbriel/config.toml"]
+
+# Add Sink/Pull bindings here after checking for conflicts in your own config.
+# [keybinds]
+# "Mod+Alt+Down" = "window-sink"
+# "Mod+Alt+Up" = "window-pull"
