@@ -441,6 +441,12 @@ namespace umbriel {
       if (view->toplevel()->scheduled.maximized) {
         view->setMaximized(true);
       }
+      if (focus) {
+        if (ScrollingLayout* scrolling = scrollingLayout()) {
+          // Move the strip with the Pull projection. Keyboard focus still waits for the resize commit barrier.
+          scrolling->activateColumn(scrolling->columnOf(view), scrollViewportExtent());
+        }
+      }
       arrange(true);
     } else {
       syncFloatingStack(view);
@@ -461,7 +467,7 @@ namespace umbriel {
       return false;
     }
     while (!m_sinkStack.empty()) {
-      View* pulled = pull(false);
+      View* pulled = pull(m_sinkStack.entries().back() == view);
       if (pulled == view) {
         if (SinkPresentation* presentation = sinkPresentationFor(view)) {
           presentation->focusOnComplete = true;
@@ -1303,7 +1309,10 @@ namespace umbriel {
       // node's default origin.
       const wlr_box& presented = view->presentedBox();
       const bool positioned = view->positioned() && presented.width > 0 && presented.height > 0;
-      const bool opening = !positioned || view->tiledOpeningDeferred();
+      // A pulled view is still displayed by its Sink projection. Give its hidden live tree the final slot now, so
+      // the projection can move into that slot while established tiled peers reflow around it.
+      const bool pulling = sinkPresentationFor(view) != nullptr && !view->sunk();
+      const bool opening = !positioned || view->tiledOpeningDeferred() || pulling;
       const std::optional<wlr_box> openingLayoutBox = view->openingLayoutBox();
       view->setLayoutTarget(slot.x, slot.y);
       if ((!view->onActiveWorkspace() && !m_inSwitchTransition && !overviewActive)
@@ -1360,37 +1369,13 @@ namespace umbriel {
       });
     }
 
-    // Only a fresh map reveals late: View::handleMap hides a tiled opener whose windows_in will run, and it waits here
-    // while this arrange animates established members. A member that merely rejoins the layout, from floating or from
-    // another workspace, keeps whatever it is already showing.
-    const bool reflowing = animateMove && !views.empty();
-    std::erase_if(m_motion.pendingOpenings, [&](const LayoutMotion::PendingOpening& opening) {
-      return opening.view == nullptr
-          || !opening.view->mapped()
-          || opening.view->workspace() != this
-          || m_layout->columnOf(opening.view) < 0;
-    });
+    // A new member starts windows_in while its peers move. Waiting for the reflow to finish leaves the new slot empty
+    // for the entire windows_move duration, which is especially visible when the client takes time to commit its size.
     std::vector<View*> openingViews;
     for (const Member& member : members) {
       if (!member.opening) {
         continue;
       }
-      if (reflowing && member.view->tiledOpeningDeferred()) {
-        const auto pending =
-            std::ranges::find_if(m_motion.pendingOpenings, [&](const LayoutMotion::PendingOpening& opening) {
-              return opening.view == member.view;
-            });
-        if (pending != m_motion.pendingOpenings.end()) {
-          pending->to = member.to;
-        } else {
-          m_motion.pendingOpenings.push_back({.view = member.view, .to = member.to});
-        }
-        continue;
-      }
-
-      std::erase_if(m_motion.pendingOpenings, [&](const LayoutMotion::PendingOpening& opening) {
-        return opening.view == member.view;
-      });
       member.view->resumeTiledOpening();
       member.view->endLayoutMotion();
       member.view->presentTiledBox(member.to);
@@ -1474,7 +1459,7 @@ namespace umbriel {
     const bool geometryTicked = m_motion.progress.tick(nowMsec);
     const bool needsFinalPresentation = !m_motion.progress.animating() && !m_motion.views.empty();
     if (!geometryTicked && !needsFinalPresentation) {
-      return revealPendingOpenings();
+      return false;
     }
 
     const double progress = m_motion.geometryCurve.value(m_motion.progress.progress());
@@ -1496,26 +1481,6 @@ namespace umbriel {
         entry.view->endLayoutMotion();
       }
     }
-    return revealPendingOpenings();
-  }
-
-  bool Workspace::revealPendingOpenings() {
-    if (m_motion.progress.animating() || !m_motion.views.empty()) {
-      return !m_motion.pendingOpenings.empty();
-    }
-    std::vector<LayoutMotion::PendingOpening> pending = std::move(m_motion.pendingOpenings);
-    m_motion.pendingOpenings.clear();
-    for (const LayoutMotion::PendingOpening& opening : pending) {
-      if (opening.view == nullptr
-          || !opening.view->mapped()
-          || opening.view->workspace() != this
-          || m_layout->columnOf(opening.view) < 0) {
-        continue;
-      }
-      opening.view->resumeTiledOpening();
-      opening.view->presentTiledBox(opening.to);
-      opening.view->raiseToTop();
-    }
     return false;
   }
 
@@ -1523,7 +1488,6 @@ namespace umbriel {
     m_motion.progress.snap(1.0);
     std::vector<LayoutMotion::ViewEntry> views = std::move(m_motion.views);
     m_motion.views.clear();
-    revealPendingOpenings();
     for (const LayoutMotion::ViewEntry& entry : views) {
       entry.view->endLayoutMotion();
     }
@@ -1566,13 +1530,6 @@ namespace umbriel {
 
   void Workspace::releaseLayoutMotion(View* view) {
     std::erase_if(m_motion.views, [view](const LayoutMotion::ViewEntry& entry) { return entry.view == view; });
-    if (std::erase_if(
-            m_motion.pendingOpenings,
-            [view](const LayoutMotion::PendingOpening& opening) { return opening.view == view; }
-        )
-        > 0) {
-      view->resumeTiledOpening();
-    }
   }
 
   const AnimatedValue* Workspace::layoutMotionValue() const {

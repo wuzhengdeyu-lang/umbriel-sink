@@ -82,6 +82,8 @@ chooses its own duration, so `duration_ms` has no effect on that event.
 `windows_in` accepts `popin`, `zoom`, `slide`, `fade`, or `none`.
 `windows_out` accepts `fade`, `slide`, `popin`, or `zoom`. `scale` applies to
 `popin`.
+New tiled windows start `windows_in` while existing windows perform their
+`windows_move` reflow, so the new slot does not wait empty for movement to end.
 
 `animation.overview.workspace_curve` controls filmstrip movement after wheel,
 keyboard, and touchpad navigation.
