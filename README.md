@@ -107,8 +107,7 @@ meson compile -C build-sink-release umbriel
 
 If `build-sink-release/` already exists, only the second command is needed. Log out of a running Umbriel Sink session
 before installing a new binary. These are suggested paths for a separate installation, not replacements for the
-official session. The `build*/` directories and `compile_commands.json` are ignored by [`.gitignore`](.gitignore);
-do not commit or force-add build products.
+official session. 
 
 | Repository file | Suggested installed location / purpose |
 | --- | --- |
