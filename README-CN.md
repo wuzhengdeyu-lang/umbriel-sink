@@ -103,7 +103,6 @@ meson compile -C build-sink-release umbriel
 
 已有 `build-sink-release/` 时只需第二条命令。安装前请先退出正在运行的 Umbriel Sink 会话；
 下列路径是建议的独立安装布局，不会替代官方 Umbriel。
-`build*/` 和 `compile_commands.json` 已被 [`.gitignore`](.gitignore) 忽略，构建产物不应提交或强制添加到 Git。
 
 | 仓库文件 | 建议安装位置 / 用途 |
 | --- | --- |
